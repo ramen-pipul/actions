@@ -1,22 +1,31 @@
-# extract-version javascript action
+# GitHub Actions
 
-This action extracts version number from the release branch/tag name.
+This repository contains several GitHub Actions that help building and deploying other projects.
 
-## Inputs
+## List of Actions
 
-## `git-ref`
+| Action | Description |
+|--------|-------------|
+| `extract-version`| Creates version number in a format `a.b.c.d` from the `git-ref` and the build number |
+| `ssh-upload`| Uploads artifacts on to the WWW server using SSH protocol
 
-**Required** The name of the person to greet. Default `"release/1.0"`.
+## Definitions
 
-## Outputs
+### `extract-version`
 
-## `build-version`
+| Parameter | Default | Description |
+|-----------|-|-------------|
+| `git-ref` | *`release/1.0`* | **Required** Either tag or branch name from the push that triggered the build |
+| `build-number` | *`0`* | Build number from the `github` context |
 
-The version number in a format `"a.b.c"`.
+| Output | Description |
+|-----------|-------------|
+| `build-version`| Build version as a string in a format `a.b.c.d` |
 
-## Example usage
+### `ssh-upload`
 
-uses: ramen-pipul/actions/extract-version@v1.1
-with:
-  build-number: ${{buildNumber}}
-  git-ref: ${{gitRef}}
+| Parameter | Default | Description |
+|-----------|-|-------------|
+| `host` | *`localhost`* | **Required** Host or IP Address to connect to |
+| `ssh-user` | *None* | Username used for the connection |
+| `ssh-key` | *None* | SSH key string |
