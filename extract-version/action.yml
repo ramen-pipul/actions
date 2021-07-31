@@ -1,0 +1,17 @@
+name: 'Extract Version'
+description: 'Extracts version number from the branch or tag'
+inputs:
+  build-number:
+    description: 'Build number to include in the last digit of the version'
+    required: false
+    default: 0
+  git-ref:  # id of input
+    description: 'Git-ref'
+    required: true
+    default: 'release/1.0'
+outputs:
+  build-version: # id of output
+    description: 'The version of the build in a format {a}.{b}.{c}'
+runs:
+  using: 'node16'
+  main: '../src/extract-version.js'
