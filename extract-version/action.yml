@@ -13,5 +13,5 @@ outputs:
   build-version: # id of output
     description: 'The version of the build in a format {a}.{b}.{c}'
 runs:
-  using: 'node16'
+  using: 'node12'
   main: '../src/extract-version.js'
