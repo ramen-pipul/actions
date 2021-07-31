@@ -1,0 +1,30 @@
+name: 'SSH Upload'
+description: 'Uploads the build artifact using SSH protocol on the WWW server'
+inputs:
+  host:
+    description: 'Hostname'
+    required: true
+    default: 'localhost'
+  ssh-user:
+    description: 'SSH username'
+    required: true
+  ssh-key:  # id of input
+    description: 'SSH private key'
+    required: true
+  remote-dir:
+    description: 'Remote directory where all files will be uploaded'
+    required: true
+    default: '/'
+  remove-files:
+    description: 'Remove all files in the remote-dir before upload'
+    required: false
+    default: true
+  artifact:
+    description: 'Source artifact that will be extracted and uploaded'
+    required: true
+outputs:
+  build-version: # id of output
+    description: 'The version of the build in a format {a}.{b}.{c}'
+runs:
+  using: 'node12'
+  main: 'bin/index.js'
