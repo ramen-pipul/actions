@@ -14,4 +14,4 @@ outputs:
     description: 'The version of the build in a format {a}.{b}.{c}'
 runs:
   using: 'node12'
-  main: '../src/extract-version.js'
+  main: 'bin/index.js'
