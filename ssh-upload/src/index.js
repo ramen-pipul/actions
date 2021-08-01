@@ -40,7 +40,7 @@ try {
         return ssh.exec('rm', ['-rf', 'tmp'], stdOut)
         .then(() => {
           console.log(`Uploading files from '${sourceDir}'...`)
-          return ssh.putDirectory(sourceDir, remoteDir, { recursive: true, tick: (local, remote, error) => {
+          return ssh.putDirectory(sourceDir, 'tmp', { recursive: true, tick: (local, remote, error) => {
             if (error) {
               throw new Error(`Cannot upload ${local}`)
             }
@@ -50,9 +50,9 @@ try {
             }
           }})
           .then(() => {
-            return ssh.exec('rm', ['-rf', 'www'], stdOut)
+            return ssh.exec('rm', ['-rf', remoteDir], stdOut)
             .then(() => {
-              return ssh.exec('mv', ['tmp', 'www'], stdOut)
+              return ssh.exec('mv', ['tmp', remoteDir], stdOut)
             })
           })
         })
