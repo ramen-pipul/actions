@@ -1,0 +1,8 @@
+name: 'Set Build Version'
+description: 'Creeates the version from git-ref and run-number'
+outputs:
+  build-version: # id of output
+    description: 'The version of the build in a format {version-major}.{version-minor}.{run-number}'
+runs:
+  using: 'node12'
+  main: 'bin/index.js'
