@@ -42,6 +42,8 @@ try {
     const appInfoStr = fs.readFileSync(injectVersion)
     const appInfo = JSON.parse(appInfoStr)
     appInfo.version = buildVersion
+    
+    console.log(`Injecting version into '${injectVersion}' (${appInfoStr})`)
 
     fs.writeFileSync(injectVersion, JSON.stringify(appInfo))
   }
