@@ -18,7 +18,7 @@ try {
     const username = core.getInput('ssh-user');
     const privateKey = core.getInput('ssh-key');
     const sourceDir = core.getInput('source-dir');
-    const remoteDir = coree.getInput('remote-dir');
+    const remoteDir = core.getInput('remote-dir');
 
     if (!sourceDir) {
       throw new Error('No source dir specified')
