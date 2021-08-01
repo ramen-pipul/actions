@@ -18,6 +18,7 @@ inputs:
   source-dir:
     description: 'Source directory that will be uploaded'
     required: true
+    default: 'build'
 runs:
   using: 'node12'
   main: 'bin/index.js'
