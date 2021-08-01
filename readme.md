@@ -13,9 +13,9 @@
 
 ### `set-version`
 
-| Inputs |
-|------------------------|
-| *This action doesn't take any inputs* |
+| Inputs | Default | Description |
+|--------|---------|-------|
+| `inject-version` | *`false`* | Set path to the json file where you want to inject the `build-version`. |
 
 | Outputs | Description |
 |-----------|-------------|

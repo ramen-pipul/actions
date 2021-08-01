@@ -1,5 +1,6 @@
 const core = require('@actions/core');
 const github = require('@actions/github');
+const fs = require('fs');
 
 const releaseRef = 'refs/heads/release/'
 const versionTagRef = 'refs/tags/v'
@@ -33,8 +34,19 @@ try {
   if (!gitRef) {
     throw new Error("No git-ref has been found.")
   }
+
+  const buildVersion =  `${extractVersionFromRef(gitRef)}.${runNumber}`
+
+  const injectVersion = core.getInput("inject-version")
+  if (injectVersion) {
+    const appInfoStr = fs.readFileSync(injectVersion)
+    const appInfo = JSON.parse(appInfoStr)
+    appInfo.version = buildVersion
+
+    fs.writeFileSync(injectVersion, JSON.stringify(appInfo))
+  }
   
-  core.setOutput("build-version", `${extractVersionFromRef(gitRef)}.${runNumber}`);
+  core.setOutput("build-version", buildVersion);
 
 } catch (error) {
   core.setFailed(error.message);

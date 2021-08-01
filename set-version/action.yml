@@ -1,5 +1,9 @@
 name: 'Set Build Version'
 description: 'Creeates the version from git-ref and run-number'
+inputs:
+  inject-version:
+    description: 'If set, will inject the build-version into the target json object'
+    default: false
 outputs:
   build-version: # id of output
     description: 'The version of the build in a format {version-major}.{version-minor}.{run-number}'
