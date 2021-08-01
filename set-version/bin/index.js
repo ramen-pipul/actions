@@ -6281,6 +6281,7 @@ var __webpack_exports__ = {};
 (() => {
 const core = __nccwpck_require__(904);
 const github = __nccwpck_require__(786);
+const fs = __nccwpck_require__(747);
 
 const releaseRef = 'refs/heads/release/'
 const versionTagRef = 'refs/tags/v'
@@ -6314,8 +6315,21 @@ try {
   if (!gitRef) {
     throw new Error("No git-ref has been found.")
   }
+
+  const buildVersion =  `${extractVersionFromRef(gitRef)}.${runNumber}`
+
+  const injectVersion = core.getInput("inject-version")
+  if (injectVersion) {
+    const appInfoStr = fs.readFileSync(injectVersion)
+    const appInfo = JSON.parse(appInfoStr)
+    appInfo.version = buildVersion
+    
+    console.log(`Injecting version into '${injectVersion}' (${appInfoStr})`)
+
+    fs.writeFileSync(injectVersion, JSON.stringify(appInfo))
+  }
   
-  core.setOutput("build-version", `${extractVersionFromRef(gitRef)}.${runNumber}`);
+  core.setOutput("build-version", buildVersion);
 
 } catch (error) {
   core.setFailed(error.message);
