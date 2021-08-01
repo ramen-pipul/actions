@@ -25349,7 +25349,19 @@ try {
     const username = core.getInput('ssh-user');
     const privateKey = core.getInput('ssh-key');
     const sourceDir = core.getInput('source-dir');
-    const remoteDir = coree.getInput('remote-dir');
+    const remoteDir = core.getInput('remote-dir');
+
+    if (!sourceDir) {
+      throw new Error('No source dir specified')
+    }
+
+    if (!privateKey) {
+      throw new Error('No private key specified')
+    }
+
+    if (!username) {
+      throw new Error('No usename specified')
+    }
 
     let fileCounter = 0;
 
@@ -25359,7 +25371,7 @@ try {
         return ssh.exec('rm', ['-rf', 'tmp'], stdOut)
         .then(() => {
           console.log(`Uploading files from '${sourceDir}'...`)
-          return ssh.putDirectory(sourceDir, remoteDir, { recursive: true, tick: (local, remote, error) => {
+          return ssh.putDirectory(sourceDir, 'tmp', { recursive: true, tick: (local, remote, error) => {
             if (error) {
               throw new Error(`Cannot upload ${local}`)
             }
@@ -25369,9 +25381,9 @@ try {
             }
           }})
           .then(() => {
-            return ssh.exec('rm', ['-rf', 'www'], stdOut)
+            return ssh.exec('rm', ['-rf', remoteDir], stdOut)
             .then(() => {
-              return ssh.exec('mv', ['tmp', 'www'], stdOut)
+              return ssh.exec('mv', ['tmp', remoteDir], stdOut)
             })
           })
         })
