@@ -29,7 +29,8 @@ try {
 
   const runNumber = github.context.runNumber
   const gitRef = github.context.ref
-  console.log(`Build: ${runNumber}, Ref: ${gitRef}`);
+  const sha = github.context.sha
+  console.log(`Build: ${runNumber}, Ref: ${gitRef}, Sha: ${sha}`);
 
   if (!gitRef) {
     throw new Error("No git-ref has been found.")
@@ -42,6 +43,7 @@ try {
     const appInfoStr = fs.readFileSync(injectVersion)
     const appInfo = JSON.parse(appInfoStr)
     appInfo.version = buildVersion
+    appInfo.sha = sha
     
     console.log(`Injecting version into '${injectVersion}' (${appInfoStr})`)
 
