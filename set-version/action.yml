@@ -8,5 +8,5 @@ outputs:
   build-version: # id of output
     description: 'The version of the build in a format {version-major}.{version-minor}.{run-number}'
 runs:
-  using: 'node12'
+  using: 'node16'
   main: 'bin/index.js'

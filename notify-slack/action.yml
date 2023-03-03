@@ -1,0 +1,15 @@
+name: 'Notify Slack'
+description: 'Sends Slack notification using the predefined message.'
+inputs:
+  token:
+    description: 'Slack token'
+  message:
+    description: 'Path to the JSON file that contains the message template'
+  params:
+    description: 'All parameters for the message that are used in the template file'
+outputs:
+  message-id: # id of output
+    description: 'The message ID of the notification that was sent'
+runs:
+  using: 'node16'
+  main: 'bin/index.js'
