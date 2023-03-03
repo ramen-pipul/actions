@@ -9,6 +9,8 @@ inputs:
     description: 'Path to the JSON file that contains the message template'
   params:
     description: 'All parameters for the message that are used in the template file'
+  message-id:
+    description: 'Message ID to update the status for'
 outputs:
   message-id: # id of output
     description: 'The message ID of the notification that was sent'
