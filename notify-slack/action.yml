@@ -1,6 +1,8 @@
 name: 'Notify Slack'
 description: 'Sends Slack notification using the predefined message.'
 inputs:
+  channel:
+    description: 'Channel to push to'
   token:
     description: 'Slack token'
   message:
