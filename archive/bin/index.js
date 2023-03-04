@@ -11388,7 +11388,8 @@ const path = __nccwpck_require__(1017);
 const wcmatch = __nccwpck_require__(2597);
 
 try {
-  let dirToArchive = ".";
+  const workspace = process.cwd();
+  let dirToArchive = workspace;
   const baseDirArg = core.getInput("base-dir");
   const wildcardsArg = core.getInput("wildcards");
   const archive = core.getInput("out-path");
@@ -11406,7 +11407,7 @@ try {
   const wildcards = [];
   if (wildcardsArg) {
     wildcardsArg.split(/\r?\n/).forEach((x) => {
-      wildcards.push(wcmatch(x.trim()));
+      wildcards.push(x.trim());
     });
   }
 
@@ -11417,8 +11418,9 @@ try {
     for (let i = 0; i < results.length; i++) {
       const file = results[i];
       for (let y = 0; y < wildcards.length; y++) {
-        const wildcard = wildcards[y];
-        if (wildcard(file)) {
+        const wildcard = dirToArchive + wildcards[y];
+        console.log(`Matching ${wildcard}:`);
+        if (wcmatch(wildcard)(file)) {
           console.log(`Adding ${file}...`);
           files.push(file);
           break;
