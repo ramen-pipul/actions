@@ -35,7 +35,12 @@ try {
     for (let i = 0; i < results.length; i++) {
       const file = results[i];
       for (let y = 0; y < wildcards.length; y++) {
-        const wildcard = path.join(dirToArchive, wildcards[y]);
+        let wildcard = wildards[y];
+
+        if (!path.isAbsolute(wildcard)) {
+            wildcard = path.join(dirToArchive, wildcards[y]);
+        }
+        
         if (wcmatch(wildcard)(file)) {
           console.log(`Adding ${file}...`);
           files.push(file);
@@ -43,6 +48,9 @@ try {
         }
       }
     }
+
+    const outdir = path.dirname(archive);
+    fs.mkdirSync(outdir);
     tar
       .c({ cwd: dirToArchive, gzip: true, sync: true }, files)
       .pipe(fs.createWriteStream(archive));
