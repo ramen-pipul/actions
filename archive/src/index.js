@@ -29,7 +29,13 @@ try {
 
   walk(dirToArchive, (err, results) => {
     if (err) throw err;
+    console.log('All files:')
+    results.forEach(f => console.log(f));
     const files = results.filter((x) => wildcards.some((w) => w(x)));
+    console.log('Wildcards:');
+    wildcardsArg.forEach(w => console.log(w.pattern));
+    console.log('Filtered files:');
+    files.forEach(f => console.log(f));
     tar
       .c({ cwd: dirToArchive, gzip: true, sync: true }, files)
       .pipe(fs.createWriteStream(archive));
