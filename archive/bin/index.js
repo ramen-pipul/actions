@@ -11388,7 +11388,7 @@ const path = __nccwpck_require__(1017);
 const wcmatch = __nccwpck_require__(2597);
 
 try {
-  let dirToArchive = '.';
+  let dirToArchive = ".";
   const baseDirArg = core.getInput("base-dir");
   const wildcardsArg = core.getInput("wildcards");
   const archive = core.getInput("out-path");
@@ -11397,11 +11397,10 @@ try {
     dirToArchive = path.join(dirToArchive, baseDirArg);
   }
 
-
   if (!fs.existsSync(dirToArchive)) {
     throw new Error(`Path '${dirToArchive}' does not exist`);
   }
-  
+
   console.log(`Archive dir: ${dirToArchive}`);
 
   const wildcards = [];
@@ -11413,23 +11412,24 @@ try {
 
   walk(dirToArchive, (err, results) => {
     if (err) throw err;
-    const files = results.filter(x => wildcards.some(w => w(x)))
-    tar.c({ cwd: dirToArchive, gzip: true, sync: true}, files).pipe(fs.createWriteStream(archive))
-  })
+    const files = results.filter((x) => wildcards.some((w) => w(x)));
+    tar
+      .c({ cwd: dirToArchive, gzip: true, sync: true }, files)
+      .pipe(fs.createWriteStream(archive));
 
-  console.log(`Archive created: ${archive}`);
-
+    console.log(`Archive created: ${archive}`);
+  });
 } catch (error) {
   core.setFailed(error);
 }
 
 function walk(dir, done) {
-  const results = [];
+  let results = [];
   fs.readdir(dir, function (err, list) {
     if (err) return done(err);
     let i = 0;
     (function next() {
-      const file = list[i++];
+      let file = list[i++];
       if (!file) return done(null, results);
       file = path.resolve(dir, file);
       fs.stat(file, function (err, stat) {
@@ -11445,7 +11445,7 @@ function walk(dir, done) {
       });
     })();
   });
-};
+}
 
 })();
 
