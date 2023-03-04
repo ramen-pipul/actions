@@ -35,8 +35,7 @@ try {
     for (let i = 0; i < results.length; i++) {
       const file = results[i];
       for (let y = 0; y < wildcards.length; y++) {
-        const wildcard = dirToArchive + wildcards[y];
-        console.log(`Matching ${wildcard}:`);
+        const wildcard = path.join(dirToArchive, wildcards[y]);
         if (wcmatch(wildcard)(file)) {
           console.log(`Adding ${file}...`);
           files.push(file);
