@@ -11433,7 +11433,9 @@ try {
     }
 
     const outdir = path.dirname(archive);
-    fs.mkdirSync(outdir);
+    if (!fs.existsSync(outdir)) {
+        fs.mkdirSync(outdir, { recursive: true });
+    }
     tar
       .c({ cwd: dirToArchive, gzip: true, sync: true }, files)
       .pipe(fs.createWriteStream(archive));
