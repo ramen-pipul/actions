@@ -1,0 +1,13 @@
+name: 'Archive'
+description: 'Archives files using tar command'
+inputs:
+  base-dir:
+    description: 'Base directory for the wildcards to match (default is github.workspace)'
+  wildcards:
+    description: 'List of files to match'
+  out-path:  # id of input
+    description: 'Path of the output archive'
+    required: true
+runs:
+  using: 'node16'
+  main: 'bin/index.js'
