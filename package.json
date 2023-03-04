@@ -4,12 +4,13 @@
   "description": "",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "ftp-upload": "ncc build ./ftp-upload/src/index.js --license license.txt -o ./ftp-upload/bin",
-    "ssh-upload": "ncc build ./ssh-upload/src/index.js --license license.txt -o ./ssh-upload/bin",
-    "set-version": "ncc build ./set-version/src/index.js --license license.txt -o ./set-version/bin",
-    "notify-slack": "ncc build ./notify-slack/src/index.js --license license.txt -o ./notify-slack/bin",
-    "read-deps": "ncc build ./read-deps/src/index.js --license license.txt -o ./read-deps/bin",
-    "compile": "npm run ftp-upload && npm run ssh-upload && npm run set-version && npm run notify-slack && npm run read-deps"
+    "action:ftp-upload": "ncc build ./ftp-upload/src/index.js --license license.txt -o ./ftp-upload/bin",
+    "action:ssh-upload": "ncc build ./ssh-upload/src/index.js --license license.txt -o ./ssh-upload/bin",
+    "action:set-version": "ncc build ./set-version/src/index.js --license license.txt -o ./set-version/bin",
+    "action:notify-slack": "ncc build ./notify-slack/src/index.js --license license.txt -o ./notify-slack/bin",
+    "action:read-deps": "ncc build ./read-deps/src/index.js --license license.txt -o ./read-deps/bin",
+    "action:archive": "ncc build ./archive/src/index.js --license license.txt -o ./archive/bin",
+    "compile": "node compile-actions.js"
   },
   "repository": {
     "type": "git",
@@ -28,6 +29,11 @@
     "@slack/web-api": "^6.8.1",
     "ftp-deploy": "^2.4.1",
     "handlebars": "^4.7.7",
-    "node-ssh": "^12.0.0"
+    "node-ssh": "^12.0.0",
+    "tar": "^6.1.13",
+    "wildcard-match": "^5.1.2"
+  },
+  "devDependencies": {
+    "async": "^3.2.4"
   }
 }
