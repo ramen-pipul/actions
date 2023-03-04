@@ -1,5 +1,4 @@
 const core = require("@actions/core");
-const github = require("@actions/github");
 const tar = require("tar");
 const fs = require("fs");
 const path = require("path");
@@ -41,7 +40,7 @@ try {
   core.setFailed(error);
 }
 
-const walk = function (dir, done) {
+function walk(dir, done) {
   const results = [];
   fs.readdir(dir, function (err, list) {
     if (err) return done(err);
