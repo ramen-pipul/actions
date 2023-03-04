@@ -29,13 +29,19 @@ try {
 
   walk(dirToArchive, (err, results) => {
     if (err) throw err;
-    console.log('All files:')
-    results.forEach(f => console.log(f));
-    const files = results.filter((x) => wildcards.some((w) => w(x)));
-    console.log('Wildcards:');
-    wildcards.forEach(w => console.log(w.pattern));
-    console.log('Filtered files:');
-    files.forEach(f => console.log(f));
+
+    const files = [];
+    for (let i = 0; i < results.length; i++) {
+      const file = results[i];
+      for (let y = 0; y < wildcards.length; y++) {
+        const wildcard = wildcards[y];
+        if (wildcard(file)) {
+          console.log(`Adding ${file}...`);
+          files.push(file);
+          break;
+        }
+      }
+    }
     tar
       .c({ cwd: dirToArchive, gzip: true, sync: true }, files)
       .pipe(fs.createWriteStream(archive));
