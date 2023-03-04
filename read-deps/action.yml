@@ -1,0 +1,10 @@
+name: 'Read dependencies'
+description: 'Reads dependecies from a specified JSON file'
+inputs:
+  deps-file:
+    description: 'Path to the JSON file'
+  vars:
+    description: 'Variable names of the versions to be expected in the JSON file'
+runs:
+  using: 'node16'
+  main: 'bin/index.js'

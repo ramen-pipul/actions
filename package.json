@@ -8,7 +8,8 @@
     "ssh-upload": "ncc build ./ssh-upload/src/index.js --license license.txt -o ./ssh-upload/bin",
     "set-version": "ncc build ./set-version/src/index.js --license license.txt -o ./set-version/bin",
     "notify-slack": "ncc build ./notify-slack/src/index.js --license license.txt -o ./notify-slack/bin",
-    "compile": "npm run ftp-upload && npm run ssh-upload && npm run set-version && npm run notify-slack"
+    "read-deps": "ncc build ./read-deps/src/index.js --license license.txt -o ./read-deps/bin",
+    "compile": "npm run ftp-upload && npm run ssh-upload && npm run set-version && npm run notify-slack && npm run read-deps"
   },
   "repository": {
     "type": "git",
