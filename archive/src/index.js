@@ -15,6 +15,8 @@ try {
     dirToArchive = path.join(dirToArchive, baseDirArg);
   }
 
+  const trimStart = dirToArchive.length;
+
   if (!fs.existsSync(dirToArchive)) {
     throw new Error(`Path '${dirToArchive}' does not exist`);
   }
@@ -42,8 +44,9 @@ try {
         }
 
         if (wcmatch(wildcard)(file)) {
-          console.log(`Adding ${file}...`);
-          files.push(file);
+          const relativeFilePath = file.substring(trimStart);
+          console.log(`Adding ${relativeFilePath}...`);
+          files.push(relativeFilePath);
           break;
         }
       }
