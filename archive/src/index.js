@@ -15,7 +15,7 @@ try {
     dirToArchive = path.join(dirToArchive, baseDirArg);
   }
 
-  const trimStart = dirToArchive.length;
+  const trimStart = dirToArchive.length + 1;
 
   if (!fs.existsSync(dirToArchive)) {
     throw new Error(`Path '${dirToArchive}' does not exist`);
