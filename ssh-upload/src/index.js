@@ -14,9 +14,8 @@ const stdOut = {
 };
 
 (async () => {
+  const ssh = new NodeSSH();
   try {
-    const ssh = new NodeSSH();
-
     const host = core.getInput("host");
     const username = core.getInput("ssh-user");
     const privateKey = core.getInput("ssh-key");
