@@ -1,19 +1,27 @@
-const {NodeSSH} = require('node-ssh')
-const fs = require('fs');
+const { NodeSSH } = require("node-ssh");
+const fs = require("fs");
 
-try {
+(async () => {
+  try {
     const ssh = new NodeSSH();
 
-    const privateKey = fs.readFileSync('C:\\Users\\mateusz\\.ssh\\deploy.ppk', {encoding: 'utf-8'});
+    const privateKey = fs.readFileSync("C:\\Users\\mateusz\\.ssh\\deploy.ppk", {
+      encoding: "utf-8",
+    });
 
-    ssh.connect({
-        host: 'mapo.works',
-        username: 'deploy',
-        privateKey
-    }).then(() => {
-        console.log(ssh.isConnected());
-        ssh.dispose();
-    })
-} catch (error) {
-    console.error(error.message)
-}
+    await ssh.connect({
+      host: "mapo.works",
+      username: "deploy",
+      privateKey,
+    });
+
+    console.log(ssh.isConnected());
+
+    const result = await ssh.exec("ls", ["-la"]);
+    console.log(result);
+
+    ssh.dispose();
+  } catch (error) {
+    console.error(error.message);
+  }
+})();

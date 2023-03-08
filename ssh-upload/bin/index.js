@@ -5175,6 +5175,7 @@ class Channel extends DuplexStream {
   destroy() {
     this.end();
     this.close();
+    return this;
   }
 
   // Session type-specific methods =============================================
@@ -6430,8 +6431,12 @@ const Protocol = __nccwpck_require__(6967);
 const { parseKey } = __nccwpck_require__(3879);
 const { SFTP } = __nccwpck_require__(7776);
 const {
+  bufferCopy,
+  makeBufferParser,
   makeError,
   readUInt32BE,
+  sigSSHToASN1,
+  writeUInt32BE,
 } = __nccwpck_require__(4157);
 
 const { AgentContext, createAgent, isAgent } = __nccwpck_require__(5229);
@@ -6450,6 +6455,8 @@ const {
   onCHANNEL_CLOSE,
 } = __nccwpck_require__(3630);
 
+const bufferParser = makeBufferParser();
+const sigParser = makeBufferParser();
 const RE_OPENSSH = /^OpenSSH_(?:(?![0-4])\d)|(?:\d{2,})/;
 const noop = (err) => {};
 
@@ -6834,11 +6841,25 @@ class Client extends EventEmitter {
           if (callbacks.length)
             callbacks.shift()(true);
         },
-        GLOBAL_REQUEST: (name, wantReply, data) => {
-          // Auto-reject all global requests, this can be especially useful if
-          // the server is sending us dummy keepalive global requests
-          if (wantReply)
-            proto.requestFailure();
+        GLOBAL_REQUEST: (p, name, wantReply, data) => {
+          switch (name) {
+            case 'hostkeys-00@openssh.com':
+              // Automatically verify keys before passing to end user
+              hostKeysProve(this, data, (err, keys) => {
+                if (err)
+                  return;
+                this.emit('hostkeys', keys);
+              });
+              if (wantReply)
+                proto.requestSuccess();
+              break;
+            default:
+              // Auto-reject all other global requests, this can be especially
+              // useful if the server is sending us dummy keepalive global
+              // requests
+              if (wantReply)
+                proto.requestFailure();
+          }
         },
         CHANNEL_OPEN: (p, info) => {
           // Handle incoming requests from server, typically a forwarded TCP or
@@ -7081,6 +7102,7 @@ class Client extends EventEmitter {
         this.emit('connect');
 
         cryptoInit.then(() => {
+          proto.start();
           sock.on('data', (data) => {
             try {
               proto.parse(data, 0, data.length);
@@ -8288,6 +8310,102 @@ function makeSimpleAuthHandler(authList) {
   };
 }
 
+function hostKeysProve(client, keys_, cb) {
+  if (!client._sock || !isWritable(client._sock))
+    return;
+
+  if (typeof cb !== 'function')
+    cb = noop;
+
+  if (!Array.isArray(keys_))
+    throw new TypeError('Invalid keys argument type');
+
+  const keys = [];
+  for (const key of keys_) {
+    const parsed = parseKey(key);
+    if (parsed instanceof Error)
+      throw parsed;
+    keys.push(parsed);
+  }
+
+  if (!client.config.strictVendor
+      || (client.config.strictVendor && RE_OPENSSH.test(client._remoteVer))) {
+    client._callbacks.push((had_err, data) => {
+      if (had_err) {
+        cb(had_err !== true
+           ? had_err
+           : new Error('Server failed to prove supplied keys'));
+        return;
+      }
+
+      // TODO: move all of this parsing/verifying logic out of the client?
+      const ret = [];
+      let keyIdx = 0;
+      bufferParser.init(data, 0);
+      while (bufferParser.avail()) {
+        if (keyIdx === keys.length)
+          break;
+        const key = keys[keyIdx++];
+        const keyPublic = key.getPublicSSH();
+
+        const sigEntry = bufferParser.readString();
+        sigParser.init(sigEntry, 0);
+        const type = sigParser.readString(true);
+        let value = sigParser.readString();
+
+        let algo;
+        if (type !== key.type) {
+          if (key.type === 'ssh-rsa') {
+            switch (type) {
+              case 'rsa-sha2-256':
+                algo = 'sha256';
+                break;
+              case 'rsa-sha2-512':
+                algo = 'sha512';
+                break;
+              default:
+                continue;
+            }
+          } else {
+            continue;
+          }
+        }
+
+        const sessionID = client._protocol._kex.sessionID;
+        const verifyData = Buffer.allocUnsafe(
+          4 + 29 + 4 + sessionID.length + 4 + keyPublic.length
+        );
+        let p = 0;
+        writeUInt32BE(verifyData, 29, p);
+        verifyData.utf8Write('hostkeys-prove-00@openssh.com', p += 4, 29);
+        writeUInt32BE(verifyData, sessionID.length, p += 29);
+        bufferCopy(sessionID, verifyData, 0, sessionID.length, p += 4);
+        writeUInt32BE(verifyData, keyPublic.length, p += sessionID.length);
+        bufferCopy(keyPublic, verifyData, 0, keyPublic.length, p += 4);
+
+        if (!(value = sigSSHToASN1(value, type)))
+          continue;
+        if (key.verify(verifyData, value, algo) === true)
+          ret.push(key);
+      }
+      sigParser.clear();
+      bufferParser.clear();
+
+      cb(null, ret);
+    });
+
+    client._protocol.openssh_hostKeysProve(keys);
+    return;
+  }
+
+  process.nextTick(
+    cb,
+    new Error(
+      'strictVendor enabled and server is not OpenSSH or compatible version'
+    )
+  );
+}
+
 module.exports = Client;
 
 
@@ -8520,8 +8638,8 @@ const MODULE_VER = (__nccwpck_require__(6674)/* .version */ .i8);
 const VALID_DISCONNECT_REASONS = new Map(
   Object.values(DISCONNECT_REASON).map((n) => [n, 1])
 );
-const IDENT = Buffer.from(`SSH-2.0-ssh2js${MODULE_VER}`);
-const CRLF = Buffer.from('\r\n');
+const IDENT_RAW = Buffer.from(`SSH-2.0-ssh2js${MODULE_VER}`);
+const IDENT = Buffer.from(`${IDENT_RAW}\r\n`);
 const MAX_LINE_LEN = 8192;
 const MAX_LINES = 1024;
 const PING_PAYLOAD = Buffer.from([
@@ -8671,15 +8789,27 @@ class Protocol {
     this._authsQueue = [];
     this._authenticated = false;
     this._remoteIdentRaw = undefined;
+    let sentIdent;
     if (typeof config.ident === 'string') {
       this._identRaw = Buffer.from(`SSH-2.0-${config.ident}`);
+
+      sentIdent = Buffer.allocUnsafe(this._identRaw.length + 2);
+      sentIdent.set(this._identRaw, 0);
+      sentIdent[sentIdent.length - 2] = 13; // '\r'
+      sentIdent[sentIdent.length - 1] = 10; // '\n'
     } else if (Buffer.isBuffer(config.ident)) {
       const fullIdent = Buffer.allocUnsafe(8 + config.ident.length);
       fullIdent.latin1Write('SSH-2.0-', 0, 8);
       fullIdent.set(config.ident, 8);
       this._identRaw = fullIdent;
+
+      sentIdent = Buffer.allocUnsafe(fullIdent.length + 2);
+      sentIdent.set(fullIdent, 0);
+      sentIdent[sentIdent.length - 2] = 13; // '\r'
+      sentIdent[sentIdent.length - 1] = 10; // '\n'
     } else {
-      this._identRaw = IDENT;
+      this._identRaw = IDENT_RAW;
+      sentIdent = IDENT;
     }
     this._compatFlags = 0;
 
@@ -8690,15 +8820,15 @@ class Protocol {
         this._debug('Custom crypto binding not available');
     }
 
-    process.nextTick(() => {
-      this._debug && this._debug(
-        `Local ident: ${inspect(this._identRaw.toString())}`
-      );
+    this._debug && this._debug(
+      `Local ident: ${inspect(this._identRaw.toString())}`
+    );
+    this.start = () => {
+      this.start = undefined;
       if (greeting)
         this._onWrite(greeting);
-      this._onWrite(this._identRaw);
-      this._onWrite(CRLF);
-    });
+      this._onWrite(sentIdent);
+    };
   }
   _destruct(reason) {
     this._packetRW.read.cleanup();
@@ -9865,6 +9995,42 @@ class Protocol {
     }
     sendPacket(this, this._packetRW.write.finalize(packet));
   }
+  openssh_hostKeysProve(keys) {
+    if (this._server)
+      throw new Error('Client-only method called in server mode');
+
+    let keysTotal = 0;
+    const publicKeys = [];
+    for (const key of keys) {
+      const publicKey = key.getPublicSSH();
+      keysTotal += 4 + publicKey.length;
+      publicKeys.push(publicKey);
+    }
+
+    let p = this._packetRW.write.allocStart;
+    const packet = this._packetRW.write.alloc(1 + 4 + 29 + 1 + keysTotal);
+
+    packet[p] = MESSAGE.GLOBAL_REQUEST;
+
+    writeUInt32BE(packet, 29, ++p);
+    packet.utf8Write('hostkeys-prove-00@openssh.com', p += 4, 29);
+
+    packet[p += 29] = 1; // want reply
+
+    ++p;
+    for (const buf of publicKeys) {
+      writeUInt32BE(packet, buf.length, p);
+      bufferCopy(buf, packet, 0, buf.length, p += 4);
+      p += buf.length;
+    }
+
+    if (this._debug) {
+      this._debug(
+        'Outbound: Sending GLOBAL_REQUEST (hostkeys-prove-00@openssh.com)'
+      );
+    }
+    sendPacket(this, this._packetRW.write.finalize(packet));
+  }
 
   // ===========================================================================
   // Server-specific ===========================================================
@@ -10063,6 +10229,9 @@ class Protocol {
     // Does not consume window space
 
     const origSignal = name;
+
+    if (typeof origSignal !== 'string' || !origSignal)
+      throw new Error(`Invalid signal: ${origSignal}`);
 
     let signal = name.toUpperCase();
     if (signal.slice(0, 3) === 'SIG')
@@ -10630,7 +10799,14 @@ class SFTP extends EventEmitter {
     this._pktData = undefined;
     this._writeReqid = -1;
     this._requests = {};
-    this._maxPktLen = (this._isOpenSSH ? OPENSSH_MAX_PKT_LEN : 34000);
+    this._maxInPktLen = OPENSSH_MAX_PKT_LEN;
+    this._maxOutPktLen = 34000;
+    this._maxReadLen =
+      (this._isOpenSSH ? OPENSSH_MAX_PKT_LEN : 34000) - PKT_RW_OVERHEAD;
+    this._maxWriteLen =
+      (this._isOpenSSH ? OPENSSH_MAX_PKT_LEN : 34000) - PKT_RW_OVERHEAD;
+
+    this.maxOpenHandles = undefined;
 
     // Channel compatibility
     this._client = client;
@@ -10684,8 +10860,8 @@ class SFTP extends EventEmitter {
           return;
         if (this._pktLen === 0)
           return doFatalSFTPError(this, 'Invalid packet length');
-        if (this._pktLen > this._maxPktLen) {
-          const max = this._maxPktLen;
+        if (this._pktLen > this._maxInPktLen) {
+          const max = this._maxInPktLen;
           return doFatalSFTPError(
             this,
             `Packet length ${this._pktLen} exceeds max length of ${max}`
@@ -10908,7 +11084,7 @@ class SFTP extends EventEmitter {
       return;
     }
 
-    const maxDataLen = this._maxPktLen - PKT_RW_OVERHEAD;
+    const maxDataLen = this._maxWriteLen;
     const overflow = Math.max(len - maxDataLen, 0);
     const origPosition = position;
 
@@ -11897,7 +12073,7 @@ class SFTP extends EventEmitter {
       throw new Error('Client-only method called in server mode');
 
     const ext = this._extensions['hardlink@openssh.com'];
-    if (!ext || ext.indexOf('1') === -1)
+    if (ext !== '1')
       throw new Error('Server does not support this extended request');
 
     /*
@@ -11937,7 +12113,7 @@ class SFTP extends EventEmitter {
       throw new Error('Client-only method called in server mode');
 
     const ext = this._extensions['fsync@openssh.com'];
-    if (!ext || ext.indexOf('1') === -1)
+    if (ext !== '1')
       throw new Error('Server does not support this extended request');
     if (!Buffer.isBuffer(handle))
       throw new Error('handle is not a Buffer');
@@ -11967,6 +12143,188 @@ class SFTP extends EventEmitter {
     this._debug && this._debug(
       `SFTP: Outbound: ${isBuffered ? 'Buffered' : 'Sending'} fsync@openssh.com`
     );
+  }
+  ext_openssh_lsetstat(path, attrs, cb) {
+    if (this.server)
+      throw new Error('Client-only method called in server mode');
+
+    const ext = this._extensions['lsetstat@openssh.com'];
+    if (ext !== '1')
+      throw new Error('Server does not support this extended request');
+
+    let flags = 0;
+    let attrsLen = 0;
+
+    if (typeof attrs === 'object' && attrs !== null) {
+      attrs = attrsToBytes(attrs);
+      flags = attrs.flags;
+      attrsLen = attrs.nb;
+    } else if (typeof attrs === 'function') {
+      cb = attrs;
+    }
+
+    /*
+      uint32    id
+      string    "lsetstat@openssh.com"
+      string    path
+      ATTRS     attrs
+    */
+    const pathLen = Buffer.byteLength(path);
+    let p = 9;
+    const buf =
+      Buffer.allocUnsafe(4 + 1 + 4 + 4 + 20 + 4 + pathLen + 4 + attrsLen);
+
+    writeUInt32BE(buf, buf.length - 4, 0);
+    buf[4] = REQUEST.EXTENDED;
+    const reqid = this._writeReqid = (this._writeReqid + 1) & MAX_REQID;
+    writeUInt32BE(buf, reqid, 5);
+
+    writeUInt32BE(buf, 20, p);
+    buf.utf8Write('lsetstat@openssh.com', p += 4, 20);
+
+    writeUInt32BE(buf, pathLen, p += 20);
+    buf.utf8Write(path, p += 4, pathLen);
+
+    writeUInt32BE(buf, flags, p += pathLen);
+    if (attrsLen) {
+      p += 4;
+
+      if (attrsLen === ATTRS_BUF.length)
+        buf.set(ATTRS_BUF, p);
+      else
+        bufferCopy(ATTRS_BUF, buf, 0, attrsLen, p);
+
+      p += attrsLen;
+    }
+
+    this._requests[reqid] = { cb };
+
+    const isBuffered = sendOrBuffer(this, buf);
+    if (this._debug) {
+      const status = (isBuffered ? 'Buffered' : 'Sending');
+      this._debug(`SFTP: Outbound: ${status} lsetstat@openssh.com`);
+    }
+  }
+  ext_openssh_expandPath(path, cb) {
+    if (this.server)
+      throw new Error('Client-only method called in server mode');
+
+    const ext = this._extensions['expand-path@openssh.com'];
+    if (ext !== '1')
+      throw new Error('Server does not support this extended request');
+
+    /*
+      uint32    id
+      string    "expand-path@openssh.com"
+      string    path
+    */
+    const pathLen = Buffer.byteLength(path);
+    let p = 9;
+    const buf = Buffer.allocUnsafe(4 + 1 + 4 + 4 + 23 + 4 + pathLen);
+
+    writeUInt32BE(buf, buf.length - 4, 0);
+    buf[4] = REQUEST.EXTENDED;
+    const reqid = this._writeReqid = (this._writeReqid + 1) & MAX_REQID;
+    writeUInt32BE(buf, reqid, 5);
+
+    writeUInt32BE(buf, 23, p);
+    buf.utf8Write('expand-path@openssh.com', p += 4, 23);
+
+    writeUInt32BE(buf, pathLen, p += 20);
+    buf.utf8Write(path, p += 4, pathLen);
+
+    this._requests[reqid] = { cb };
+
+    const isBuffered = sendOrBuffer(this, buf);
+    if (this._debug) {
+      const status = (isBuffered ? 'Buffered' : 'Sending');
+      this._debug(`SFTP: Outbound: ${status} expand-path@openssh.com`);
+    }
+  }
+  ext_copy_data(srcHandle, srcOffset, len, dstHandle, dstOffset, cb) {
+    if (this.server)
+      throw new Error('Client-only method called in server mode');
+
+    const ext = this._extensions['copy-data'];
+    if (ext !== '1')
+      throw new Error('Server does not support this extended request');
+
+    if (!Buffer.isBuffer(srcHandle))
+      throw new Error('Source handle is not a Buffer');
+
+    if (!Buffer.isBuffer(dstHandle))
+      throw new Error('Destination handle is not a Buffer');
+
+    /*
+      uint32    id
+      string    "copy-data"
+      string    read-from-handle
+      uint64    read-from-offset
+      uint64    read-data-length
+      string    write-to-handle
+      uint64    write-to-offset
+    */
+    let p = 0;
+    const buf = Buffer.allocUnsafe(
+      4 + 1
+      + 4
+      + 4 + 9
+      + 4 + srcHandle.length
+      + 8
+      + 8
+      + 4 + dstHandle.length
+      + 8
+    );
+
+    writeUInt32BE(buf, buf.length - 4, p);
+    p += 4;
+
+    buf[p] = REQUEST.EXTENDED;
+    ++p;
+
+    const reqid = this._writeReqid = (this._writeReqid + 1) & MAX_REQID;
+    writeUInt32BE(buf, reqid, p);
+    p += 4;
+
+    writeUInt32BE(buf, 9, p);
+    p += 4;
+    buf.utf8Write('copy-data', p, 9);
+    p += 9;
+
+    writeUInt32BE(buf, srcHandle.length, p);
+    p += 4;
+    buf.set(srcHandle, p);
+    p += srcHandle.length;
+
+    for (let i = 7; i >= 0; --i) {
+      buf[p + i] = srcOffset & 0xFF;
+      srcOffset /= 256;
+    }
+    p += 8;
+
+    for (let i = 7; i >= 0; --i) {
+      buf[p + i] = len & 0xFF;
+      len /= 256;
+    }
+    p += 8;
+
+    writeUInt32BE(buf, dstHandle.length, p);
+    p += 4;
+    buf.set(dstHandle, p);
+    p += dstHandle.length;
+
+    for (let i = 7; i >= 0; --i) {
+      buf[p + i] = dstOffset & 0xFF;
+      dstOffset /= 256;
+    }
+
+    this._requests[reqid] = { cb };
+
+    const isBuffered = sendOrBuffer(this, buf);
+    if (this._debug) {
+      const status = (isBuffered ? 'Buffered' : 'Sending');
+      this._debug(`SFTP: Outbound: ${status} copy-data`);
+    }
   }
   // ===========================================================================
   // Server-specific ===========================================================
@@ -12236,7 +12594,7 @@ function tryCreateBuffer(size) {
 }
 
 function read_(self, handle, buf, off, len, position, cb, req_) {
-  const maxDataLen = self._maxPktLen - PKT_RW_OVERHEAD;
+  const maxDataLen = self._maxReadLen;
   const overflow = Math.max(len - maxDataLen, 0);
 
   if (overflow)
@@ -12294,11 +12652,12 @@ function read_(self, handle, buf, off, len, position, cb, req_) {
         return;
       }
 
+      nb = (nb || 0);
       if (req.origOff === 0 && buf.length === req.nb)
         data = buf;
       else
-        data = bufferSlice(buf, req.origOff, req.origOff + req.nb);
-      cb(undefined, req.nb + (nb || 0), data, req.position);
+        data = bufferSlice(buf, req.origOff, req.origOff + req.nb + nb);
+      cb(undefined, req.nb + nb, data, req.position);
     },
     buffer: undefined,
   });
@@ -12374,13 +12733,13 @@ function fastXfer(src, dst, srcPath, dstPath, opts, cb) {
         if (--left === 0)
           cb(err);
       };
-      if (srcHandle && (src === fs || src.writable))
+      if (srcHandle && (src === fs || src.outgoing.state === 'open'))
         ++left;
-      if (dstHandle && (dst === fs || dst.writable))
+      if (dstHandle && (dst === fs || dst.outgoing.state === 'open'))
         ++left;
-      if (srcHandle && (src === fs || src.writable))
+      if (srcHandle && (src === fs || src.outgoing.state === 'open'))
         src.close(srcHandle, cbfinal);
-      if (dstHandle && (dst === fs || dst.writable))
+      if (dstHandle && (dst === fs || dst.outgoing.state === 'open'))
         dst.close(dstHandle, cbfinal);
     } else {
       cb(err);
@@ -12788,7 +13147,8 @@ function tryWritePayload(sftp, payload) {
     return;
 
   if (outgoing.window === 0) {
-    sftp._waitWindow = true; // XXX: Unnecessary?
+    sftp._waitWindow = true;
+    sftp._chunkcb = drainBuffer;
     return payload;
   }
 
@@ -12870,6 +13230,31 @@ function cleanupRequests(sftp) {
   }
 }
 
+function requestLimits(sftp, cb) {
+  /*
+    uint32    id
+    string    "limits@openssh.com"
+  */
+  let p = 9;
+  const buf = Buffer.allocUnsafe(4 + 1 + 4 + 4 + 18);
+
+  writeUInt32BE(buf, buf.length - 4, 0);
+  buf[4] = REQUEST.EXTENDED;
+  const reqid = sftp._writeReqid = (sftp._writeReqid + 1) & MAX_REQID;
+  writeUInt32BE(buf, reqid, 5);
+
+  writeUInt32BE(buf, 18, p);
+  buf.utf8Write('limits@openssh.com', p += 4, 18);
+
+  sftp._requests[reqid] = { extended: 'limits@openssh.com', cb };
+
+  const isBuffered = sendOrBuffer(sftp, buf);
+  if (sftp._debug) {
+    const which = (isBuffered ? 'Buffered' : 'Sending');
+    sftp._debug(`SFTP: Outbound: ${which} limits@openssh.com`);
+  }
+}
+
 const CLIENT_HANDLERS = {
   [RESPONSE.VERSION]: (sftp, payload) => {
     if (sftp._version !== -1)
@@ -12910,6 +13295,24 @@ const CLIENT_HANDLERS = {
 
     sftp._version = version;
     sftp._extensions = extensions;
+
+    if (extensions['limits@openssh.com'] === '1') {
+      return requestLimits(sftp, (err, limits) => {
+        if (!err) {
+          if (limits.maxPktLen > 0)
+            sftp._maxOutPktLen = limits.maxPktLen;
+          if (limits.maxReadLen > 0)
+            sftp._maxReadLen = limits.maxReadLen;
+          if (limits.maxWriteLen > 0)
+            sftp._maxWriteLen = limits.maxWriteLen;
+          sftp.maxOpenHandles = (
+            limits.maxOpenHandles > 0 ? limits.maxOpenHandles : Infinity
+          );
+        }
+        sftp.emit('ready');
+      });
+    }
+
     sftp.emit('ready');
   },
   [RESPONSE.STATUS]: (sftp, payload) => {
@@ -12922,14 +13325,13 @@ const CLIENT_HANDLERS = {
     */
     const errorCode = bufferParser.readUInt32BE();
     const errorMsg = bufferParser.readString(true);
-    const lang = bufferParser.skipString();
     bufferParser.clear();
 
-    if (lang === undefined) {
-      if (reqID !== undefined)
-        delete sftp._requests[reqID];
-      return doFatalSFTPError(sftp, 'Malformed STATUS packet');
-    }
+    // Note: we avoid checking that the error message and language tag are in
+    // the packet because there are some broken implementations that incorrectly
+    // omit them. The language tag in general was never really used amongst ssh
+    // implementations, so in the case of a missing error message we just
+    // default to something sensible.
 
     if (sftp._debug) {
       const jsonMsg = JSON.stringify(errorMsg);
@@ -13143,6 +13545,32 @@ const CLIENT_HANDLERS = {
             bufferParser.clear();
             if (typeof req.cb === 'function')
               req.cb(undefined, stats);
+            return;
+          }
+          case 'limits@openssh.com': {
+            /*
+              uint64          max-packet-length
+              uint64          max-read-length
+              uint64          max-write-length
+              uint64          max-open-handles
+            */
+            const limits = {
+              maxPktLen: bufferParser.readUInt64BE(),
+              maxReadLen: bufferParser.readUInt64BE(),
+              maxWriteLen: bufferParser.readUInt64BE(),
+              maxOpenHandles: bufferParser.readUInt64BE(),
+            };
+            if (limits.maxOpenHandles === undefined)
+              break;
+            if (sftp._debug) {
+              sftp._debug(
+                'SFTP: Inbound: Received EXTENDED_REPLY '
+                  + `(id:${reqID}, ${req.extended})`
+              );
+            }
+            bufferParser.clear();
+            if (typeof req.cb === 'function')
+              req.cb(undefined, limits);
             return;
           }
           default:
@@ -13690,7 +14118,7 @@ function ReadStream(sftp, path, options) {
   this.autoClose = options.autoClose === undefined ? true : options.autoClose;
   this.pos = 0;
   this.bytesRead = 0;
-  this.closed = false;
+  this.isClosed = false;
 
   this.handle = options.handle === undefined ? null : options.handle;
   this.sftp = sftp;
@@ -13842,7 +14270,7 @@ function closeStream(stream, cb, err) {
   function onclose(er) {
     er = er || err;
     cb(er);
-    stream.closed = true;
+    stream.isClosed = true;
     if (!er)
       stream.emit('close');
   }
@@ -13885,7 +14313,7 @@ function WriteStream(sftp, path, options) {
   this.autoClose = options.autoClose === undefined ? true : options.autoClose;
   this.pos = 0;
   this.bytesWritten = 0;
-  this.closed = false;
+  this.isClosed = false;
 
   this.handle = options.handle === undefined ? null : options.handle;
   this.sftp = sftp;
@@ -14045,7 +14473,7 @@ if (typeof WritableStream.prototype.destroy !== 'function')
 WriteStream.prototype._destroy = ReadStream.prototype._destroy;
 WriteStream.prototype.close = function(cb) {
   if (cb) {
-    if (this.closed) {
+    if (this.isClosed) {
       process.nextTick(cb);
       return;
     }
@@ -14096,7 +14524,7 @@ try {
   cpuInfo = __nccwpck_require__(8841)();
 } catch {}
 
-const { bindingAvailable } = __nccwpck_require__(9678);
+const { bindingAvailable, CIPHER_INFO, MAC_INFO } = __nccwpck_require__(9678);
 
 const eddsaSupported = (() => {
   if (typeof crypto.sign === 'function'
@@ -14165,11 +14593,13 @@ const SUPPORTED_SERVER_HOST_KEY = DEFAULT_SERVER_HOST_KEY.concat([
 ]);
 
 
-const DEFAULT_CIPHER = [
+const canUseCipher = (() => {
+  const ciphers = crypto.getCiphers();
+  return (name) => ciphers.includes(CIPHER_INFO[name].sslName);
+})();
+let DEFAULT_CIPHER = [
   // http://tools.ietf.org/html/rfc5647
-  'aes128-gcm',
   'aes128-gcm@openssh.com',
-  'aes256-gcm',
   'aes256-gcm@openssh.com',
 
   // http://tools.ietf.org/html/rfc4344#section-4
@@ -14190,12 +14620,15 @@ if (cpuInfo && cpuInfo.flags && !cpuInfo.flags.aes) {
 } else {
   DEFAULT_CIPHER.push('chacha20-poly1305@openssh.com');
 }
+DEFAULT_CIPHER = DEFAULT_CIPHER.filter(canUseCipher);
 const SUPPORTED_CIPHER = DEFAULT_CIPHER.concat([
   'aes256-cbc',
   'aes192-cbc',
   'aes128-cbc',
   'blowfish-cbc',
   '3des-cbc',
+  'aes128-gcm',
+  'aes256-gcm',
 
   // http://tools.ietf.org/html/rfc4345#section-4:
   'arcfour256',
@@ -14203,9 +14636,13 @@ const SUPPORTED_CIPHER = DEFAULT_CIPHER.concat([
 
   'cast128-cbc',
   'arcfour',
-]);
+].filter(canUseCipher));
 
 
+const canUseMAC = (() => {
+  const hashes = crypto.getHashes();
+  return (name) => hashes.includes(MAC_INFO[name].sslName);
+})();
 const DEFAULT_MAC = [
   'hmac-sha2-256-etm@openssh.com',
   'hmac-sha2-512-etm@openssh.com',
@@ -14213,7 +14650,7 @@ const DEFAULT_MAC = [
   'hmac-sha2-256',
   'hmac-sha2-512',
   'hmac-sha1',
-];
+].filter(canUseMAC);
 const SUPPORTED_MAC = DEFAULT_MAC.concat([
   'hmac-md5',
   'hmac-sha2-256-96', // first 96 bits of HMAC-SHA256
@@ -14221,7 +14658,7 @@ const SUPPORTED_MAC = DEFAULT_MAC.concat([
   'hmac-ripemd160',
   'hmac-sha1-96',     // first 96 bits of HMAC-SHA1
   'hmac-md5-96',      // first 96 bits of HMAC-MD5
-]);
+].filter(canUseMAC));
 
 const DEFAULT_COMPRESSION = [
   'none',
@@ -15017,22 +15454,17 @@ class NullDecipher {
       // Read padding length, payload, and padding
       if (this._packetPos < this._len) {
         const nb = Math.min(this._len - this._packetPos, dataLen - p);
-        if (p !== 0 || nb !== dataLen) {
-          if (nb === this._len) {
-            this._packet = new FastBuffer(data.buffer, data.byteOffset + p, nb);
-          } else {
-            this._packet = Buffer.allocUnsafe(this._len);
-            this._packet.set(
-              new Uint8Array(data.buffer, data.byteOffset + p, nb),
-              this._packetPos
-            );
-          }
-        } else if (nb === this._len) {
-          this._packet = data;
+        let chunk;
+        if (p !== 0 || nb !== dataLen)
+          chunk = new Uint8Array(data.buffer, data.byteOffset + p, nb);
+        else
+          chunk = data;
+        if (nb === this._len) {
+          this._packet = chunk;
         } else {
           if (!this._packet)
             this._packet = Buffer.allocUnsafe(this._len);
-          this._packet.set(data, this._packetPos);
+          this._packet.set(chunk, this._packetPos);
         }
         p += nb;
         this._packetPos += nb;
@@ -15775,7 +16207,7 @@ class GenericDecipherBinding {
           this._len = need = readUInt32BE(this._block, 0);
         } else {
           // Decrypt first block to get packet length
-          this._instance.decryptBlock(this._block, this.inSeqno);
+          this._instance.decryptBlock(this._block);
           this._len = readUInt32BE(this._block, 0);
           need = 4 + this._len - this._block.length;
         }
@@ -15787,35 +16219,15 @@ class GenericDecipherBinding {
         }
 
         if (!this._macETM) {
-          const pktStart = (this._block.length - 4);
-          const startP = p - pktStart;
-          let endP;
-          if (p >= pktStart && (endP = startP + this._len) <= dataLen) {
-            // The entire packet exists within the current chunk, with the
-            // first block already decrypted
-            if (startP === 0 && endP === dataLen) {
-              this._packet = data;
-              this._pktLen = this._len;
-            } else {
-              this._packet = new FastBuffer(
-                data.buffer,
-                data.byteOffset + startP,
-                this._len
-              );
-              this._pktLen = this._len;
-            }
-            p = endP;
-          } else {
-            this._pktLen = pktStart;
-            if (this._pktLen) {
-              this._packet = Buffer.allocUnsafe(this._len);
-              this._packet.set(
-                new Uint8Array(this._block.buffer,
-                               this._block.byteOffset + 4,
-                               this._pktLen),
-                0
-              );
-            }
+          this._pktLen = (this._block.length - 4);
+          if (this._pktLen) {
+            this._packet = Buffer.allocUnsafe(this._len);
+            this._packet.set(
+              new Uint8Array(this._block.buffer,
+                             this._block.byteOffset + 4,
+                             this._pktLen),
+              0
+            );
           }
         }
 
@@ -16082,28 +16494,27 @@ function(createPoly1305) {
   createPoly1305 = createPoly1305 || {};
 
 
-var b;b||(b=typeof createPoly1305 !== 'undefined' ? createPoly1305 : {});var q,r;b.ready=new Promise(function(a,c){q=a;r=c});var u={},w;for(w in b)b.hasOwnProperty(w)&&(u[w]=b[w]);var x=!1,y=!1,A=!1,B=!1;x="object"===typeof window;y="function"===typeof importScripts;A="object"===typeof process&&"object"===typeof process.versions&&"string"===typeof process.versions.node;B=!x&&!A&&!y;var C="",D,E,F,G,H;
-if(A)C=y?(__nccwpck_require__(1017).dirname)(C)+"/":__dirname+"/",D=function(a,c){var d=I(a);if(d)return c?d:d.toString();G||(G=__nccwpck_require__(7147));H||(H=__nccwpck_require__(1017));a=H.normalize(a);return G.readFileSync(a,c?null:"utf8")},F=function(a){a=D(a,!0);a.buffer||(a=new Uint8Array(a));assert(a.buffer);return a},1<process.argv.length&&process.argv[1].replace(/\\/g,"/"),process.argv.slice(2),process.on("unhandledRejection",J),b.inspect=function(){return"[Emscripten Module object]"};else if(B)"undefined"!=typeof read&&
-(D=function(a){var c=I(a);return c?K(c):read(a)}),F=function(a){var c;if(c=I(a))return c;if("function"===typeof readbuffer)return new Uint8Array(readbuffer(a));c=read(a,"binary");assert("object"===typeof c);return c},"undefined"!==typeof print&&("undefined"===typeof console&&(console={}),console.log=print,console.warn=console.error="undefined"!==typeof printErr?printErr:print);else if(x||y)y?C=self.location.href:"undefined"!==typeof document&&document.currentScript&&(C=document.currentScript.src),
-_scriptDir&&(C=_scriptDir),0!==C.indexOf("blob:")?C=C.substr(0,C.lastIndexOf("/")+1):C="",D=function(a){try{var c=new XMLHttpRequest;c.open("GET",a,!1);c.send(null);return c.responseText}catch(d){if(a=I(a))return K(a);throw d;}},y&&(F=function(a){try{var c=new XMLHttpRequest;c.open("GET",a,!1);c.responseType="arraybuffer";c.send(null);return new Uint8Array(c.response)}catch(d){if(a=I(a))return a;throw d;}}),E=function(a,c,d){var e=new XMLHttpRequest;e.open("GET",a,!0);e.responseType="arraybuffer";
-e.onload=function(){if(200==e.status||0==e.status&&e.response)c(e.response);else{var f=I(a);f?c(f.buffer):d()}};e.onerror=d;e.send(null)};b.print||console.log.bind(console);var L=b.printErr||console.warn.bind(console);for(w in u)u.hasOwnProperty(w)&&(b[w]=u[w]);u=null;var M;b.wasmBinary&&(M=b.wasmBinary);var noExitRuntime=b.noExitRuntime||!0;"object"!==typeof WebAssembly&&J("no native wasm support detected");var N,O=!1;function assert(a,c){a||J("Assertion failed: "+c)}
-function aa(a){var c=b["_"+a];assert(c,"Cannot call unknown function "+a+", make sure it is exported");return c}
-function ba(a,c,d,e){var f={string:function(g){var p=0;if(null!==g&&void 0!==g&&0!==g){var n=(g.length<<2)+1;p=P(n);var k=p,h=Q;if(0<n){n=k+n-1;for(var v=0;v<g.length;++v){var l=g.charCodeAt(v);if(55296<=l&&57343>=l){var pa=g.charCodeAt(++v);l=65536+((l&1023)<<10)|pa&1023}if(127>=l){if(k>=n)break;h[k++]=l}else{if(2047>=l){if(k+1>=n)break;h[k++]=192|l>>6}else{if(65535>=l){if(k+2>=n)break;h[k++]=224|l>>12}else{if(k+3>=n)break;h[k++]=240|l>>18;h[k++]=128|l>>12&63}h[k++]=128|l>>6&63}h[k++]=128|l&63}}h[k]=
-0}}return p},array:function(g){var p=P(g.length);da.set(g,p);return p}},m=aa(a),z=[];a=0;if(e)for(var t=0;t<e.length;t++){var ca=f[d[t]];ca?(0===a&&(a=ea()),z[t]=ca(e[t])):z[t]=e[t]}d=m.apply(null,z);d=function(g){if("string"===c)if(g){for(var p=Q,n=g+NaN,k=g;p[k]&&!(k>=n);)++k;if(16<k-g&&p.subarray&&fa)g=fa.decode(p.subarray(g,k));else{for(n="";g<k;){var h=p[g++];if(h&128){var v=p[g++]&63;if(192==(h&224))n+=String.fromCharCode((h&31)<<6|v);else{var l=p[g++]&63;h=224==(h&240)?(h&15)<<12|v<<6|l:(h&
-7)<<18|v<<12|l<<6|p[g++]&63;65536>h?n+=String.fromCharCode(h):(h-=65536,n+=String.fromCharCode(55296|h>>10,56320|h&1023))}}else n+=String.fromCharCode(h)}g=n}}else g="";else g="boolean"===c?!!g:g;return g}(d);0!==a&&ha(a);return d}var fa="undefined"!==typeof TextDecoder?new TextDecoder("utf8"):void 0,ia,da,Q;
-function ja(){var a=N.buffer;ia=a;b.HEAP8=da=new Int8Array(a);b.HEAP16=new Int16Array(a);b.HEAP32=new Int32Array(a);b.HEAPU8=Q=new Uint8Array(a);b.HEAPU16=new Uint16Array(a);b.HEAPU32=new Uint32Array(a);b.HEAPF32=new Float32Array(a);b.HEAPF64=new Float64Array(a)}var R,ka=[],la=[],ma=[];function na(){var a=b.preRun.shift();ka.unshift(a)}var S=0,T=null,U=null;b.preloadedImages={};b.preloadedAudios={};
-function J(a){if(b.onAbort)b.onAbort(a);L(a);O=!0;a=new WebAssembly.RuntimeError("abort("+a+"). Build with -s ASSERTIONS=1 for more info.");r(a);throw a;}var V="data:application/octet-stream;base64,",W="data:application/octet-stream;base64,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";if(!W.startsWith(V)){var oa=W;W=b.locateFile?b.locateFile(oa,C):C+oa}function qa(){var a=W;try{if(a==W&&M)return new Uint8Array(M);var c=I(a);if(c)return c;if(F)return F(a);throw"both async and sync fetching of the wasm failed";}catch(d){J(d)}}
-function ra(){if(!M&&(x||y)){if("function"===typeof fetch&&!W.startsWith("file://"))return fetch(W,{credentials:"same-origin"}).then(function(a){if(!a.ok)throw"failed to load wasm binary file at '"+W+"'";return a.arrayBuffer()}).catch(function(){return qa()});if(E)return new Promise(function(a,c){E(W,function(d){a(new Uint8Array(d))},c)})}return Promise.resolve().then(function(){return qa()})}
-function X(a){for(;0<a.length;){var c=a.shift();if("function"==typeof c)c(b);else{var d=c.m;"number"===typeof d?void 0===c.l?R.get(d)():R.get(d)(c.l):d(void 0===c.l?null:c.l)}}}var sa=!1;function K(a){for(var c=[],d=0;d<a.length;d++){var e=a[d];255<e&&(sa&&assert(!1,"Character code "+e+" ("+String.fromCharCode(e)+")  at offset "+d+" not in 0x00-0xFF."),e&=255);c.push(String.fromCharCode(e))}return c.join("")}
-var ta="function"===typeof atob?atob:function(a){var c="",d=0;a=a.replace(/[^A-Za-z0-9\+\/=]/g,"");do{var e="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=".indexOf(a.charAt(d++));var f="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=".indexOf(a.charAt(d++));var m="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=".indexOf(a.charAt(d++));var z="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=".indexOf(a.charAt(d++));e=e<<2|f>>4;
-f=(f&15)<<4|m>>2;var t=(m&3)<<6|z;c+=String.fromCharCode(e);64!==m&&(c+=String.fromCharCode(f));64!==z&&(c+=String.fromCharCode(t))}while(d<a.length);return c};
-function I(a){if(a.startsWith(V)){a=a.slice(V.length);if("boolean"===typeof A&&A){try{var c=Buffer.from(a,"base64")}catch(m){c=new Buffer(a,"base64")}var d=new Uint8Array(c.buffer,c.byteOffset,c.byteLength)}else try{var e=ta(a),f=new Uint8Array(e.length);for(c=0;c<e.length;++c)f[c]=e.charCodeAt(c);d=f}catch(m){throw Error("Converting base64 string to bytes failed.");}return d}}
-var ua={a:function(a){var c=Q.length;a>>>=0;if(2147483648<a)return!1;for(var d=1;4>=d;d*=2){var e=c*(1+.2/d);e=Math.min(e,a+100663296);e=Math.max(a,e);0<e%65536&&(e+=65536-e%65536);a:{try{N.grow(Math.min(2147483648,e)-ia.byteLength+65535>>>16);ja();var f=1;break a}catch(m){}f=void 0}if(f)return!0}return!1}};
-(function(){function a(f){b.asm=f.exports;N=b.asm.b;ja();R=b.asm.j;la.unshift(b.asm.c);S--;b.monitorRunDependencies&&b.monitorRunDependencies(S);0==S&&(null!==T&&(clearInterval(T),T=null),U&&(f=U,U=null,f()))}function c(f){a(f.instance)}function d(f){return ra().then(function(m){return WebAssembly.instantiate(m,e)}).then(f,function(m){L("failed to asynchronously prepare wasm: "+m);J(m)})}var e={a:ua};S++;b.monitorRunDependencies&&b.monitorRunDependencies(S);if(b.instantiateWasm)try{return b.instantiateWasm(e,
-a)}catch(f){return L("Module.instantiateWasm callback failed with error: "+f),!1}(function(){return M||"function"!==typeof WebAssembly.instantiateStreaming||W.startsWith(V)||W.startsWith("file://")||"function"!==typeof fetch?d(c):fetch(W,{credentials:"same-origin"}).then(function(f){return WebAssembly.instantiateStreaming(f,e).then(c,function(m){L("wasm streaming compile failed: "+m);L("falling back to ArrayBuffer instantiation");return d(c)})})})().catch(r);return{}})();
-b.___wasm_call_ctors=function(){return(b.___wasm_call_ctors=b.asm.c).apply(null,arguments)};b._poly1305_auth=function(){return(b._poly1305_auth=b.asm.d).apply(null,arguments)};var ea=b.stackSave=function(){return(ea=b.stackSave=b.asm.e).apply(null,arguments)},ha=b.stackRestore=function(){return(ha=b.stackRestore=b.asm.f).apply(null,arguments)},P=b.stackAlloc=function(){return(P=b.stackAlloc=b.asm.g).apply(null,arguments)};b._malloc=function(){return(b._malloc=b.asm.h).apply(null,arguments)};
-b._free=function(){return(b._free=b.asm.i).apply(null,arguments)};b.cwrap=function(a,c,d,e){d=d||[];var f=d.every(function(m){return"number"===m});return"string"!==c&&f&&!e?aa(a):function(){return ba(a,c,d,arguments)}};var Y;U=function va(){Y||Z();Y||(U=va)};
-function Z(){function a(){if(!Y&&(Y=!0,b.calledRun=!0,!O)){X(la);q(b);if(b.onRuntimeInitialized)b.onRuntimeInitialized();if(b.postRun)for("function"==typeof b.postRun&&(b.postRun=[b.postRun]);b.postRun.length;){var c=b.postRun.shift();ma.unshift(c)}X(ma)}}if(!(0<S)){if(b.preRun)for("function"==typeof b.preRun&&(b.preRun=[b.preRun]);b.preRun.length;)na();X(ka);0<S||(b.setStatus?(b.setStatus("Running..."),setTimeout(function(){setTimeout(function(){b.setStatus("")},1);a()},1)):a())}}b.run=Z;
+var b;b||(b=typeof createPoly1305 !== 'undefined' ? createPoly1305 : {});var q,r;b.ready=new Promise(function(a,c){q=a;r=c});var u={},w;for(w in b)b.hasOwnProperty(w)&&(u[w]=b[w]);var x="object"===typeof window,y="function"===typeof importScripts,z="object"===typeof process&&"object"===typeof process.versions&&"string"===typeof process.versions.node,B="",C,D,E,F,G;
+if(z)B=y?(__nccwpck_require__(1017).dirname)(B)+"/":__dirname+"/",C=function(a,c){var d=H(a);if(d)return c?d:d.toString();F||(F=__nccwpck_require__(7147));G||(G=__nccwpck_require__(1017));a=G.normalize(a);return F.readFileSync(a,c?null:"utf8")},E=function(a){a=C(a,!0);a.buffer||(a=new Uint8Array(a));assert(a.buffer);return a},D=function(a,c,d){var e=H(a);e&&c(e);F||(F=__nccwpck_require__(7147));G||(G=__nccwpck_require__(1017));a=G.normalize(a);F.readFile(a,function(f,l){f?d(f):c(l.buffer)})},1<process.argv.length&&process.argv[1].replace(/\\/g,"/"),process.argv.slice(2),
+b.inspect=function(){return"[Emscripten Module object]"};else if(x||y)y?B=self.location.href:"undefined"!==typeof document&&document.currentScript&&(B=document.currentScript.src),_scriptDir&&(B=_scriptDir),0!==B.indexOf("blob:")?B=B.substr(0,B.lastIndexOf("/")+1):B="",C=function(a){try{var c=new XMLHttpRequest;c.open("GET",a,!1);c.send(null);return c.responseText}catch(f){if(a=H(a)){c=[];for(var d=0;d<a.length;d++){var e=a[d];255<e&&(ba&&assert(!1,"Character code "+e+" ("+String.fromCharCode(e)+")  at offset "+
+d+" not in 0x00-0xFF."),e&=255);c.push(String.fromCharCode(e))}return c.join("")}throw f;}},y&&(E=function(a){try{var c=new XMLHttpRequest;c.open("GET",a,!1);c.responseType="arraybuffer";c.send(null);return new Uint8Array(c.response)}catch(d){if(a=H(a))return a;throw d;}}),D=function(a,c,d){var e=new XMLHttpRequest;e.open("GET",a,!0);e.responseType="arraybuffer";e.onload=function(){if(200==e.status||0==e.status&&e.response)c(e.response);else{var f=H(a);f?c(f.buffer):d()}};e.onerror=d;e.send(null)};
+b.print||console.log.bind(console);var I=b.printErr||console.warn.bind(console);for(w in u)u.hasOwnProperty(w)&&(b[w]=u[w]);u=null;var J;b.wasmBinary&&(J=b.wasmBinary);var noExitRuntime=b.noExitRuntime||!0;"object"!==typeof WebAssembly&&K("no native wasm support detected");var L,M=!1;function assert(a,c){a||K("Assertion failed: "+c)}function N(a){var c=b["_"+a];assert(c,"Cannot call unknown function "+a+", make sure it is exported");return c}
+function ca(a,c,d,e){var f={string:function(g){var p=0;if(null!==g&&void 0!==g&&0!==g){var n=(g.length<<2)+1;p=O(n);var k=p,h=P;if(0<n){n=k+n-1;for(var v=0;v<g.length;++v){var m=g.charCodeAt(v);if(55296<=m&&57343>=m){var oa=g.charCodeAt(++v);m=65536+((m&1023)<<10)|oa&1023}if(127>=m){if(k>=n)break;h[k++]=m}else{if(2047>=m){if(k+1>=n)break;h[k++]=192|m>>6}else{if(65535>=m){if(k+2>=n)break;h[k++]=224|m>>12}else{if(k+3>=n)break;h[k++]=240|m>>18;h[k++]=128|m>>12&63}h[k++]=128|m>>6&63}h[k++]=128|m&63}}h[k]=
+0}}return p},array:function(g){var p=O(g.length);Q.set(g,p);return p}},l=N(a),A=[];a=0;if(e)for(var t=0;t<e.length;t++){var aa=f[d[t]];aa?(0===a&&(a=da()),A[t]=aa(e[t])):A[t]=e[t]}d=l.apply(null,A);d=function(g){if("string"===c)if(g){for(var p=P,n=g+NaN,k=g;p[k]&&!(k>=n);)++k;if(16<k-g&&p.subarray&&ea)g=ea.decode(p.subarray(g,k));else{for(n="";g<k;){var h=p[g++];if(h&128){var v=p[g++]&63;if(192==(h&224))n+=String.fromCharCode((h&31)<<6|v);else{var m=p[g++]&63;h=224==(h&240)?(h&15)<<12|v<<6|m:(h&7)<<
+18|v<<12|m<<6|p[g++]&63;65536>h?n+=String.fromCharCode(h):(h-=65536,n+=String.fromCharCode(55296|h>>10,56320|h&1023))}}else n+=String.fromCharCode(h)}g=n}}else g="";else g="boolean"===c?!!g:g;return g}(d);0!==a&&fa(a);return d}var ea="undefined"!==typeof TextDecoder?new TextDecoder("utf8"):void 0,ha,Q,P;
+function ia(){var a=L.buffer;ha=a;b.HEAP8=Q=new Int8Array(a);b.HEAP16=new Int16Array(a);b.HEAP32=new Int32Array(a);b.HEAPU8=P=new Uint8Array(a);b.HEAPU16=new Uint16Array(a);b.HEAPU32=new Uint32Array(a);b.HEAPF32=new Float32Array(a);b.HEAPF64=new Float64Array(a)}var R,ja=[],ka=[],la=[];function ma(){var a=b.preRun.shift();ja.unshift(a)}var S=0,T=null,U=null;b.preloadedImages={};b.preloadedAudios={};
+function K(a){if(b.onAbort)b.onAbort(a);I(a);M=!0;a=new WebAssembly.RuntimeError("abort("+a+"). Build with -s ASSERTIONS=1 for more info.");r(a);throw a;}var V="data:application/octet-stream;base64,",W;W="data:application/octet-stream;base64,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";if(!W.startsWith(V)){var na=W;W=b.locateFile?b.locateFile(na,B):B+na}function pa(){var a=W;try{if(a==W&&J)return new Uint8Array(J);var c=H(a);if(c)return c;if(E)return E(a);throw"both async and sync fetching of the wasm failed";}catch(d){K(d)}}
+function qa(){if(!J&&(x||y)){if("function"===typeof fetch&&!W.startsWith("file://"))return fetch(W,{credentials:"same-origin"}).then(function(a){if(!a.ok)throw"failed to load wasm binary file at '"+W+"'";return a.arrayBuffer()}).catch(function(){return pa()});if(D)return new Promise(function(a,c){D(W,function(d){a(new Uint8Array(d))},c)})}return Promise.resolve().then(function(){return pa()})}
+function X(a){for(;0<a.length;){var c=a.shift();if("function"==typeof c)c(b);else{var d=c.m;"number"===typeof d?void 0===c.l?R.get(d)():R.get(d)(c.l):d(void 0===c.l?null:c.l)}}}
+var ba=!1,ra="function"===typeof atob?atob:function(a){var c="",d=0;a=a.replace(/[^A-Za-z0-9\+\/=]/g,"");do{var e="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=".indexOf(a.charAt(d++));var f="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=".indexOf(a.charAt(d++));var l="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=".indexOf(a.charAt(d++));var A="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=".indexOf(a.charAt(d++));e=e<<
+2|f>>4;f=(f&15)<<4|l>>2;var t=(l&3)<<6|A;c+=String.fromCharCode(e);64!==l&&(c+=String.fromCharCode(f));64!==A&&(c+=String.fromCharCode(t))}while(d<a.length);return c};
+function H(a){if(a.startsWith(V)){a=a.slice(V.length);if("boolean"===typeof z&&z){var c=Buffer.from(a,"base64");c=new Uint8Array(c.buffer,c.byteOffset,c.byteLength)}else try{var d=ra(a),e=new Uint8Array(d.length);for(a=0;a<d.length;++a)e[a]=d.charCodeAt(a);c=e}catch(f){throw Error("Converting base64 string to bytes failed.");}return c}}
+var sa={a:function(a){var c=P.length;a>>>=0;if(2147483648<a)return!1;for(var d=1;4>=d;d*=2){var e=c*(1+.2/d);e=Math.min(e,a+100663296);e=Math.max(a,e);0<e%65536&&(e+=65536-e%65536);a:{try{L.grow(Math.min(2147483648,e)-ha.byteLength+65535>>>16);ia();var f=1;break a}catch(l){}f=void 0}if(f)return!0}return!1}};
+(function(){function a(f){b.asm=f.exports;L=b.asm.b;ia();R=b.asm.j;ka.unshift(b.asm.c);S--;b.monitorRunDependencies&&b.monitorRunDependencies(S);0==S&&(null!==T&&(clearInterval(T),T=null),U&&(f=U,U=null,f()))}function c(f){a(f.instance)}function d(f){return qa().then(function(l){return WebAssembly.instantiate(l,e)}).then(f,function(l){I("failed to asynchronously prepare wasm: "+l);K(l)})}var e={a:sa};S++;b.monitorRunDependencies&&b.monitorRunDependencies(S);if(b.instantiateWasm)try{return b.instantiateWasm(e,
+a)}catch(f){return I("Module.instantiateWasm callback failed with error: "+f),!1}(function(){return J||"function"!==typeof WebAssembly.instantiateStreaming||W.startsWith(V)||W.startsWith("file://")||"function"!==typeof fetch?d(c):fetch(W,{credentials:"same-origin"}).then(function(f){return WebAssembly.instantiateStreaming(f,e).then(c,function(l){I("wasm streaming compile failed: "+l);I("falling back to ArrayBuffer instantiation");return d(c)})})})().catch(r);return{}})();
+b.___wasm_call_ctors=function(){return(b.___wasm_call_ctors=b.asm.c).apply(null,arguments)};b._poly1305_auth=function(){return(b._poly1305_auth=b.asm.d).apply(null,arguments)};var da=b.stackSave=function(){return(da=b.stackSave=b.asm.e).apply(null,arguments)},fa=b.stackRestore=function(){return(fa=b.stackRestore=b.asm.f).apply(null,arguments)},O=b.stackAlloc=function(){return(O=b.stackAlloc=b.asm.g).apply(null,arguments)};b._malloc=function(){return(b._malloc=b.asm.h).apply(null,arguments)};
+b._free=function(){return(b._free=b.asm.i).apply(null,arguments)};b.cwrap=function(a,c,d,e){d=d||[];var f=d.every(function(l){return"number"===l});return"string"!==c&&f&&!e?N(a):function(){return ca(a,c,d,arguments)}};var Y;U=function ta(){Y||Z();Y||(U=ta)};
+function Z(){function a(){if(!Y&&(Y=!0,b.calledRun=!0,!M)){X(ka);q(b);if(b.onRuntimeInitialized)b.onRuntimeInitialized();if(b.postRun)for("function"==typeof b.postRun&&(b.postRun=[b.postRun]);b.postRun.length;){var c=b.postRun.shift();la.unshift(c)}X(la)}}if(!(0<S)){if(b.preRun)for("function"==typeof b.preRun&&(b.preRun=[b.preRun]);b.preRun.length;)ma();X(ja);0<S||(b.setStatus?(b.setStatus("Running..."),setTimeout(function(){setTimeout(function(){b.setStatus("")},1);a()},1)):a())}}b.run=Z;
 if(b.preInit)for("function"==typeof b.preInit&&(b.preInit=[b.preInit]);0<b.preInit.length;)b.preInit.pop()();Z();
 
 
@@ -16162,6 +16573,10 @@ const {
   MESSAGE,
   TERMINAL_MODE,
 } = __nccwpck_require__(3249);
+
+const {
+  parseKey,
+} = __nccwpck_require__(3879);
 
 const TERMINAL_MODE_BY_VALUE =
   Array.from(Object.entries(TERMINAL_MODE))
@@ -16718,6 +17133,20 @@ module.exports = {
         case 'no-more-sessions@openssh.com':
           data = null;
           break;
+        case 'hostkeys-00@openssh.com': {
+          data = [];
+          while (bufferParser.avail() > 0) {
+            const keyRaw = bufferParser.readString();
+            if (keyRaw === undefined) {
+              data = undefined;
+              break;
+            }
+            const key = parseKey(keyRaw);
+            if (!(key instanceof Error))
+              data.push(key);
+          }
+          break;
+        }
         default:
           data = bufferParser.readRaw();
       }
@@ -17431,7 +17860,7 @@ function kexinit(self) {
     let kex = entry.array;
     let found = false;
     for (let i = 0; i < kex.length; ++i) {
-      if (kex[i].indexOf('group-exchange') !== -1) {
+      if (kex[i].includes('group-exchange')) {
         if (!found) {
           found = true;
           // Copy array lazily
@@ -17453,9 +17882,9 @@ function kexinit(self) {
       );
 
       payload = Buffer.allocUnsafe(len);
-      writeUInt32BE(payload, newKexBuf.length, 0);
-      payload.set(newKexBuf, 4);
-      payload.set(rest, 4 + newKexBuf.length);
+      writeUInt32BE(payload, newKexBuf.length, 17);
+      payload.set(newKexBuf, 17 + 4);
+      payload.set(rest, 17 + 4 + newKexBuf.length);
     }
   }
 
@@ -18130,18 +18559,7 @@ const createKeyExchange = (() => {
           this._protocol._packetRW.write.finalize(packet, true)
         );
       }
-      if (!this._sentNEWKEYS) {
-        this._protocol._debug && this._protocol._debug(
-          'Outbound: Sending NEWKEYS'
-        );
-        const p = this._protocol._packetRW.write.allocStartKEX;
-        const packet = this._protocol._packetRW.write.alloc(1, true);
-        packet[p] = MESSAGE.NEWKEYS;
-        this._protocol._cipher.encrypt(
-          this._protocol._packetRW.write.finalize(packet, true)
-        );
-        this._sentNEWKEYS = true;
-      }
+      trySendNEWKEYS(this);
 
       const completeHandshake = () => {
         if (!this.sessionID)
@@ -18532,6 +18950,8 @@ const createKeyExchange = (() => {
                 this._hostVerified = true;
                 if (this._receivedNEWKEYS)
                   this.finish();
+                else
+                  trySendNEWKEYS(this);
               });
             }
             if (ret === undefined) {
@@ -18555,6 +18975,7 @@ const createKeyExchange = (() => {
               'Host accepted (verified)'
             );
             this._hostVerified = true;
+            trySendNEWKEYS(this);
           }
           ++this._step;
           break;
@@ -19128,16 +19549,18 @@ function onKEXPayload(state, payload) {
 }
 
 function dhEstimate(neg) {
+  const csCipher = CIPHER_INFO[neg.cs.cipher];
+  const scCipher = CIPHER_INFO[neg.sc.cipher];
+  // XXX: if OpenSSH's `umac-*` MACs are ever supported, their key lengths will
+  // also need to be considered when calculating `bits`
   const bits = Math.max(
     0,
-    (neg.cs.cipher.sslName === 'des-ede3-cbc' ? 14 : neg.cs.cipher.keyLen),
-    neg.cs.cipher.blockLen,
-    neg.cs.cipher.ivLen,
-    neg.cs.mac.actualLen,
-    (neg.sc.cipher.sslName === 'des-ede3-cbc' ? 14 : neg.sc.cipher.keyLen),
-    neg.sc.cipher.blockLen,
-    neg.sc.cipher.ivLen,
-    neg.sc.mac.actualLen
+    (csCipher.sslName === 'des-ede3-cbc' ? 14 : csCipher.keyLen),
+    csCipher.blockLen,
+    csCipher.ivLen,
+    (scCipher.sslName === 'des-ede3-cbc' ? 14 : scCipher.keyLen),
+    scCipher.blockLen,
+    scCipher.ivLen
   ) * 8;
   if (bits <= 112)
     return 2048;
@@ -19146,6 +19569,21 @@ function dhEstimate(neg) {
   if (bits <= 192)
     return 7680;
   return 8192;
+}
+
+function trySendNEWKEYS(kex) {
+  if (!kex._sentNEWKEYS) {
+    kex._protocol._debug && kex._protocol._debug(
+      'Outbound: Sending NEWKEYS'
+    );
+    const p = kex._protocol._packetRW.write.allocStartKEX;
+    const packet = kex._protocol._packetRW.write.alloc(1, true);
+    packet[p] = MESSAGE.NEWKEYS;
+    kex._protocol._cipher.encrypt(
+      kex._protocol._packetRW.write.finalize(packet, true)
+    );
+    kex._sentNEWKEYS = true;
+  }
 }
 
 module.exports = {
@@ -19777,6 +20215,8 @@ OpenSSH_Private.prototype = BaseKey;
     } else {
       ret = [];
     }
+    if (ret instanceof Error)
+      return ret;
     // This will need to change if/when OpenSSH ever starts storing multiple
     // keys in their key files
     return ret[0];
@@ -20965,7 +21405,7 @@ module.exports = {
   doFatalError: (protocol, msg, level, reason) => {
     let err;
     if (DISCONNECT_REASON === undefined)
-      ({ DISCONNECT_REASON } = __nccwpck_require__(4157));
+      ({ DISCONNECT_REASON } = __nccwpck_require__(3249));
     if (msg instanceof Error) {
       // doFatalError(protocol, err[, reason])
       err = msg;
@@ -21610,6 +22050,7 @@ class Session extends EventEmitter {
 
     this.type = 'session';
     this.subtype = undefined;
+    this.server = true;
     this._ending = false;
     this._channel = undefined;
     this._chanInfo = {
@@ -21770,6 +22211,10 @@ class Server extends EventEmitter {
     });
     this._connections = 0;
     this.maxConnections = Infinity;
+  }
+
+  injectSocket(socket) {
+    this._srv.emit('connection', socket);
   }
 
   listen(...args) {
@@ -21973,6 +22418,8 @@ class Client extends EventEmitter {
                 reason = CHANNEL_OPEN_FAILURE.CONNECT_FAILED;
             }
 
+            if (localChan !== -1)
+              this._chanMgr.remove(localChan);
             proto.channelOpenFail(info.sender, reason, '');
           };
           const reserveChannel = () => {
@@ -22615,6 +23062,7 @@ class Client extends EventEmitter {
 
     socket.pause();
     cryptoInit.then(() => {
+      proto.start();
       socket.on('data', (data) => {
         try {
           proto.parse(data, 0, data.length);
@@ -22820,11 +23268,17 @@ function onCHANNEL_CLOSE(self, recipient, channel, err, dead) {
     onChannelOpenFailure(self, recipient, err, channel);
     return;
   }
-  if (typeof channel !== 'object'
-      || channel === null
-      || channel.incoming.state === 'closed') {
+
+  if (typeof channel !== 'object' || channel === null)
     return;
-  }
+
+  if (channel.incoming && channel.incoming.state === 'closed')
+    return;
+
+  self._chanMgr.remove(recipient);
+
+  if (channel.server && channel.constructor.name === 'Session')
+    return;
 
   channel.incoming.state = 'closed';
 
@@ -22845,8 +23299,6 @@ function onCHANNEL_CLOSE(self, recipient, channel, err, dead) {
   }
   if (channel.outgoing.state === 'closing')
     channel.outgoing.state = 'closed';
-
-  self._chanMgr.remove(recipient);
 
   const readState = channel._readableState;
   const writeState = channel._writableState;
@@ -27491,11 +27943,256 @@ exports["default"] = scanDirectory;
 
 /***/ }),
 
+/***/ 7912:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+/**
+ * filesize
+ *
+ * @copyright 2022 Jason Mulligan <jason.mulligan@avoidwork.com>
+ * @license BSD-3-Clause
+ * @version 10.0.6
+ */
+
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+
+const ARRAY = "array";
+const BIT = "bit";
+const BITS = "bits";
+const BYTE = "byte";
+const BYTES = "bytes";
+const EMPTY = "";
+const EXPONENT = "exponent";
+const FUNCTION = "function";
+const IEC = "iec";
+const INVALID_NUMBER = "Invalid number";
+const INVALID_ROUND = "Invalid rounding method";
+const JEDEC = "jedec";
+const OBJECT = "object";
+const PERIOD = ".";
+const ROUND = "round";
+const S = "s";
+const SI_KBIT = "kbit";
+const SI_KBYTE = "kB";
+const SPACE = " ";
+const STRING = "string";
+const ZERO = "0";
+const STRINGS = {
+	symbol: {
+		iec: {
+			bits: ["bit", "Kibit", "Mibit", "Gibit", "Tibit", "Pibit", "Eibit", "Zibit", "Yibit"],
+			bytes: ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB", "ZiB", "YiB"]
+		},
+		jedec: {
+			bits: ["bit", "Kbit", "Mbit", "Gbit", "Tbit", "Pbit", "Ebit", "Zbit", "Ybit"],
+			bytes: ["B", "KB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB"]
+		}
+	},
+	fullform: {
+		iec: ["", "kibi", "mebi", "gibi", "tebi", "pebi", "exbi", "zebi", "yobi"],
+		jedec: ["", "kilo", "mega", "giga", "tera", "peta", "exa", "zetta", "yotta"]
+	}
+};
+
+function filesize (arg, {
+	bits = false,
+	pad = false,
+	base = -1,
+	round = 2,
+	locale = EMPTY,
+	localeOptions = {},
+	separator = EMPTY,
+	spacer = SPACE,
+	symbols = {},
+	standard = EMPTY,
+	output = STRING,
+	fullform = false,
+	fullforms = [],
+	exponent = -1,
+	roundingMethod = ROUND,
+	precision = 0
+} = {}) {
+	let e = exponent,
+		num = Number(arg),
+		result = [],
+		val = 0,
+		u = EMPTY;
+
+	// Sync base & standard
+	if (base === -1 && standard.length === 0) {
+		base = 10;
+		standard = JEDEC;
+	} else if (base === -1 && standard.length > 0) {
+		standard = standard === IEC ? IEC : JEDEC;
+		base = standard === IEC ? 2 : 10;
+	} else {
+		base = base === 2 ? 2 : 10;
+		standard = base === 10 ? JEDEC : standard === JEDEC ? JEDEC : IEC;
+	}
+
+	const ceil = base === 10 ? 1000 : 1024,
+		full = fullform === true,
+		neg = num < 0,
+		roundingFunc = Math[roundingMethod];
+
+	if (typeof arg !== "bigint" && isNaN(arg)) {
+		throw new TypeError(INVALID_NUMBER);
+	}
+
+	if (typeof roundingFunc !== FUNCTION) {
+		throw new TypeError(INVALID_ROUND);
+	}
+
+	// Flipping a negative number to determine the size
+	if (neg) {
+		num = -num;
+	}
+
+	// Determining the exponent
+	if (e === -1 || isNaN(e)) {
+		e = Math.floor(Math.log(num) / Math.log(ceil));
+
+		if (e < 0) {
+			e = 0;
+		}
+	}
+
+	// Exceeding supported length, time to reduce & multiply
+	if (e > 8) {
+		if (precision > 0) {
+			precision += 8 - e;
+		}
+
+		e = 8;
+	}
+
+	if (output === EXPONENT) {
+		return e;
+	}
+
+	// Zero is now a special case because bytes divide by 1
+	if (num === 0) {
+		result[0] = 0;
+		u = result[1] = STRINGS.symbol[standard][bits ? BITS : BYTES][e];
+	} else {
+		val = num / (base === 2 ? Math.pow(2, e * 10) : Math.pow(1000, e));
+
+		if (bits) {
+			val = val * 8;
+
+			if (val >= ceil && e < 8) {
+				val = val / ceil;
+				e++;
+			}
+		}
+
+		const p = Math.pow(10, e > 0 ? round : 0);
+		result[0] = roundingFunc(val * p) / p;
+
+		if (result[0] === ceil && e < 8 && exponent === -1) {
+			result[0] = 1;
+			e++;
+		}
+
+		u = result[1] = base === 10 && e === 1 ? bits ? SI_KBIT : SI_KBYTE : STRINGS.symbol[standard][bits ? BITS : BYTES][e];
+	}
+
+	// Decorating a 'diff'
+	if (neg) {
+		result[0] = -result[0];
+	}
+
+	// Setting optional precision
+	if (precision > 0) {
+		result[0] = result[0].toPrecision(precision);
+	}
+
+	// Applying custom symbol
+	result[1] = symbols[result[1]] || result[1];
+
+	if (locale === true) {
+		result[0] = result[0].toLocaleString();
+	} else if (locale.length > 0) {
+		result[0] = result[0].toLocaleString(locale, localeOptions);
+	} else if (separator.length > 0) {
+		result[0] = result[0].toString().replace(PERIOD, separator);
+	}
+
+	if (pad && Number.isInteger(result[0]) === false && round > 0) {
+		const x = separator || PERIOD,
+			tmp = result[0].toString().split(x),
+			s = tmp[1] || EMPTY,
+			l = s.length,
+			n = round - l;
+
+		result[0] = `${tmp[0]}${x}${s.padEnd(l + n, ZERO)}`;
+	}
+
+	if (full) {
+		result[1] = fullforms[e] ? fullforms[e] : STRINGS.fullform[standard][e] + (bits ? BIT : BYTE) + (result[0] === 1 ? EMPTY : S);
+	}
+
+	// Returning Array, Object, or String (default)
+	return output === ARRAY ? result : output === OBJECT ? {
+		value: result[0],
+		symbol: result[1],
+		exponent: e,
+		unit: u
+	} : result.join(spacer);
+}
+
+// Partial application for functional programming
+function partial ({
+	bits = false,
+	pad = false,
+	base = -1,
+	round = 2,
+	locale = EMPTY,
+	localeOptions = {},
+	separator = EMPTY,
+	spacer = SPACE,
+	symbols = {},
+	standard = EMPTY,
+	output = STRING,
+	fullform = false,
+	fullforms = [],
+	exponent = -1,
+	roundingMethod = ROUND,
+	precision = 0
+} = {}) {
+	return arg => filesize(arg, {
+		bits,
+		pad,
+		base,
+		round,
+		locale,
+		localeOptions,
+		separator,
+		spacer,
+		symbols,
+		standard,
+		output,
+		fullform,
+		fullforms,
+		exponent,
+		roundingMethod,
+		precision
+	});
+}
+
+exports.filesize = filesize;
+exports.partial = partial;
+
+
+/***/ }),
+
 /***/ 6674:
 /***/ ((module) => {
 
 "use strict";
-module.exports = {"i8":"1.1.0"};
+module.exports = {"i8":"1.11.0"};
 
 /***/ })
 
@@ -27541,77 +28238,105 @@ var __webpack_exports__ = {};
 // This entry need to be wrapped in an IIFE because it need to be isolated against other modules in the chunk.
 (() => {
 const core = __nccwpck_require__(4077);
-const {NodeSSH} = __nccwpck_require__(9481)
+const { NodeSSH } = __nccwpck_require__(9481);
+const path = __nccwpck_require__(1017);
+const fs = __nccwpck_require__(7147);
+const { filesize } = __nccwpck_require__(7912);
 
 const stdOut = {
   onStdout: (chunk) => {
-    console.log('stdoutChunk', chunk.toString('utf8'))
+    console.log("stdoutChunk", chunk.toString("utf8"));
   },
   onStderr: (chunk) => {
-    console.log('stderrChunk', chunk.toString('utf8'))
-  }
-}
+    console.log("stderrChunk", chunk.toString("utf8"));
+  },
+};
 
-try {
-    
-    const ssh = new NodeSSH()
+(async () => {
+  try {
+    const ssh = new NodeSSH();
 
-    const host = core.getInput('host');
-    const username = core.getInput('ssh-user');
-    const privateKey = core.getInput('ssh-key');
-    const sourceDir = core.getInput('source-dir');
-    const remoteDir = core.getInput('remote-dir');
+    const host = core.getInput("host");
+    const username = core.getInput("ssh-user");
+    const privateKey = core.getInput("ssh-key");
+    const sourceDir = core.getInput("source-dir");
+    const sourceFile = core.getInput("source-file");
+    const remoteDir = core.getInput("remote-dir");
+    const runScript = core.getInput("script");
 
-    if (!sourceDir) {
-      throw new Error('No source dir specified')
+    if (!(sourceDir && sourceFile) || (sourceDir && sourceFile)) {
+      throw new Error("Either source-dir or source-file is required.");
     }
 
     if (!privateKey) {
-      throw new Error('No private key specified')
+      throw new Error("No private key specified");
     }
 
     if (!username) {
-      throw new Error('No usename specified')
+      throw new Error("No usename specified");
     }
 
     let fileCounter = 0;
 
     console.log(`Connecting to ${host}...`);
-    ssh.connect({host,username,privateKey})
-      .then(() => {
-        return ssh.exec('rm', ['-rf', 'tmp'], stdOut)
-        .then(() => {
-          console.log(`Uploading files from '${sourceDir}'...`)
-          return ssh.putDirectory(sourceDir, 'tmp', { recursive: true, tick: (local, remote, error) => {
-            if (error) {
-              throw new Error(`Cannot upload ${local}`)
-            }
-            else {
-              fileCounter++;
-              console.log(`\t${remote}`)
-            }
-          }})
-          .then(() => {
-            return ssh.exec('rm', ['-rf', remoteDir], stdOut)
-            .then(() => {
-              return ssh.exec('mv', ['tmp', remoteDir], stdOut)
-            })
-          })
-        })
-      })
-      .then(() => {
-        console.log(`${fileCounter} files uploaded.`)
-      })
-      .catch((error) => {
-        core.setFailed(error.message)
-      })
-      .finally(() => {
-        ssh.dispose()
-      })
+    await ssh.connect({ host, username, privateKey });
 
+    await ssh.exec("rm", ["-rf", "tmp"], stdOut);
+
+    console.log(`Uploading files from '${sourceDir}'...`);
+
+    if (sourceDir) {
+      let uploadSize = 0;
+      await ssh.putDirectory(sourceDir, "tmp", {
+        recursive: true,
+        tick: (local, remote, error) => {
+          if (error) {
+            throw new Error(`Cannot upload ${local}`);
+          } else {
+            fileCounter++;
+            console.log(`\t${remote}`);
+            const fileStat = fs.statSync(local);
+            uploadSize += fileStat.size;
+          }
+        },
+      });
+
+      await ssh.exec("rm", ["-rf", remoteDir], stdOut);
+      await ssh.exec("mv", ["tmp", remoteDir], stdOut);
+
+      console.log(
+        `${fileCounter} files uploaded. Total of ${filesize(
+          uploadSize
+        )} uploaded.`
+      );
+    }
+    if (sourceFile) {
+      const fileName = path.basename(sourceFile);
+      const remoteFile = path.join(remoteDir, fileName);
+      await ssh.exec("mkdir", ["-p", remoteDir], stdOut);
+      await ssh.putFile(sourceFile, remoteFile);
+      const fileStat = fs.statSync(sourceFile);
+      console.log(
+        `File uploaded to ${remoteFile}. Upload size: ${filesize(
+          fileStat.size
+        )}`
+      );
+    }
+
+    if (runScript) {
+      const scriptAndArgs = runScript.split(" ");
+      const script = scriptAndArgs[0];
+      const args = scriptAndArgs.length > 1 ? scriptAndArgs.slice(1) : [];
+
+      await ssh.exec(script, args, stdOut);
+    }
   } catch (error) {
     core.setFailed(error.message);
+  } finally {
+    ssh.dispose();
   }
+})();
+
 })();
 
 module.exports = __webpack_exports__;

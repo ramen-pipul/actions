@@ -27,6 +27,7 @@
     "@actions/core": "^1.10.0",
     "@actions/github": "^5.1.1",
     "@slack/web-api": "^6.8.1",
+    "filesize": "^10.0.6",
     "ftp-deploy": "^2.4.1",
     "handlebars": "^4.7.7",
     "node-ssh": "^12.0.0",

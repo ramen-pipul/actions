@@ -36,20 +36,23 @@ try {
     throw new Error("No git-ref has been found.")
   }
 
-  const buildVersion =  `${extractVersionFromRef(gitRef)}.${runNumber}`
+  const release = extractVersionFromRef(gitRef);
+  const buildVersion =  `${release}.${runNumber}`
 
   const injectVersion = core.getInput("inject-version")
   if (injectVersion) {
     const appInfoStr = fs.readFileSync(injectVersion)
     const appInfo = JSON.parse(appInfoStr)
-    appInfo.version = buildVersion
-    appInfo.sha = sha
+    appInfo.release = release;
+    appInfo.version = buildVersion;
+    appInfo.sha = sha;
     
     console.log(`Injecting version into '${injectVersion}' (${appInfoStr})`)
 
     fs.writeFileSync(injectVersion, JSON.stringify(appInfo))
   }
   
+  core.setOutput("release-version", release);
   core.setOutput("build-version", buildVersion);
 
 } catch (error) {
