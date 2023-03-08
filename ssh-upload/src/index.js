@@ -25,7 +25,7 @@ const stdOut = {
     const remoteDir = core.getInput("remote-dir");
     const runScript = core.getInput("script");
 
-    if (!(sourceDir && sourceFile) || (sourceDir && sourceFile)) {
+    if (!(sourceDir || sourceFile) || (sourceDir && sourceFile)) {
       throw new Error("Either source-dir or source-file is required.");
     }
 
