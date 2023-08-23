@@ -3,10 +3,13 @@ description: 'Sends Slack notification using the predefined message.'
 inputs:
   channel:
     description: 'Channel to push to'
+    required: true
   token:
     description: 'Slack token'
+    required: true
   message:
     description: 'Path to the JSON file that contains the message template'
+    required: true
   params:
     description: 'All parameters for the message that are used in the template file'
   message-id:

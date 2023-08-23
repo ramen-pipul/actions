@@ -3,21 +3,18 @@ description: 'Uploads the source directory using SSH protocol on the WWW server'
 inputs:
   host:
     description: 'Hostname'
-    required: true
     default: 'localhost'
   ssh-user:
     description: 'SSH username'
     required: true
-  ssh-key:  # id of input
+  ssh-key:
     description: 'SSH private key'
     required: true
   remote-dir:
     description: 'Remote directory where all files will be uploaded'
-    required: true
     default: 'www'
   source-dir:
     description: 'Source directory that will be uploaded'
-    required: true
     default: 'build'
 runs:
   using: 'node16'

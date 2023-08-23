@@ -8,7 +8,7 @@
     "action:ssh-upload": "ncc build ./ssh-upload/src/index.js --license license.txt -o ./ssh-upload/bin",
     "action:set-version": "ncc build ./set-version/src/index.js --license license.txt -o ./set-version/bin",
     "action:notify-slack": "ncc build ./notify-slack/src/index.js --license license.txt -o ./notify-slack/bin",
-    "action:read-deps": "ncc build ./read-deps/src/index.js --license license.txt -o ./read-deps/bin",
+    "action:read-props": "ncc build ./read-props/src/index.js --license license.txt -o ./read-props/bin",
     "action:archive": "ncc build ./archive/src/index.js --license license.txt -o ./archive/bin",
     "compile": "node compile-actions.js"
   },

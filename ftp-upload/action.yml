@@ -3,21 +3,18 @@ description: 'Uploads the source directory using FTP protocol on the WWW server'
 inputs:
   host:
     description: 'Hostname'
-    required: true
     default: 'localhost'
   ftp-user:
     description: 'FTP username'
     required: true
-  ftp-password:  # id of input
+  ftp-password:
     description: 'FTP password'
     required: true
   remote-dir:
     description: 'Remote directory where all files will be uploaded'
-    required: true
     default: 'www'
   source-dir:
     description: 'Source directory that will be uploaded'
-    required: true
     default: 'build'
 runs:
   using: 'node16'

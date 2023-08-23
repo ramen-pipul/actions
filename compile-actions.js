@@ -24,6 +24,5 @@ const { series } = require("async");
     }
   }
 
-  console.log(cmds.length)
   await series(cmds);
 })();

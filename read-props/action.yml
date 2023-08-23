@@ -1,0 +1,9 @@
+name: 'Read properties'
+description: 'Reads properties of a JSON file and sets them as action output'
+inputs:
+  props-file:
+    description: 'Path to the JSON file'
+    required: true
+runs:
+  using: 'node16'
+  main: 'bin/index.js'

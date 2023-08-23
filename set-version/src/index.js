@@ -41,8 +41,11 @@ try {
 
   const injectVersion = core.getInput("inject-version")
   if (injectVersion) {
-    const appInfoStr = fs.readFileSync(injectVersion)
-    const appInfo = JSON.parse(appInfoStr)
+    let appInfo = {}
+    if (fs.existsSync(injectVersion)) {
+      const appInfoStr = fs.readFileSync(injectVersion)
+      appInfo = JSON.parse(appInfoStr)
+    }
     appInfo.release = release;
     appInfo.version = buildVersion;
     appInfo.sha = sha;

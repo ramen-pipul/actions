@@ -11412,6 +11412,9 @@ try {
       wildcards.push(x.trim());
     });
   }
+  else {
+    wildcards.push('**/*')
+  }
 
   walk(dirToArchive, (err, results) => {
     if (err) throw err;

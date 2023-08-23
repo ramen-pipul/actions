@@ -2821,20 +2821,17 @@ const fs = __nccwpck_require__(147);
 const core = __nccwpck_require__(77);
 
 try {
-    const filePath = core.getInput('deps-file');
-    const vars = core.getInput('vars');
+    const filePath = core.getInput('props-file');
 
-    if (!filePath) throw new Error('deps-file input is expected.');
-    if (!vars) throw new Error('vars input is expected.');
+    if (!filePath) throw new Error('props-file input is expected.');
 
     if(!fs.existsSync(filePath)) throw new Error(`${filePath} does not exist.`);
 
     const deps = JSON.parse(fs.readFileSync(filePath, { encoding: 'utf-8'}));
-    vars.split(',').forEach(v => {
-        if (!deps[v]) throw new Error(`Undefined variable '${v}' in file ${filePath}`);
-        core.info(`${v}: ${deps[v]}`)
-        core.setOutput(deps[v]);
-    });
+    for (const d in deps) {
+        core.info(`${d}: ${deps[d]}`)
+        core.setOutput(d, deps[d]);
+    }
 
 } catch (error) {
     core.setFailed(error);
