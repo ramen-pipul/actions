@@ -50,9 +50,9 @@ try {
     appInfo.version = buildVersion;
     appInfo.sha = sha;
     
-    console.log(`Injecting version into '${injectVersion}' (${appInfoStr})`)
-
-    fs.writeFileSync(injectVersion, JSON.stringify(appInfo))
+    const appInfoContent = JSON.stringify(appInfo)
+    core.info(`Injecting version into '${injectVersion} (${appInfoContent})`)
+    fs.writeFileSync(injectVersion, )
   }
   
   core.setOutput("release-version", release);
