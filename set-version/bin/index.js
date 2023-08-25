@@ -9828,7 +9828,7 @@ try {
     
     const appInfoContent = JSON.stringify(appInfo)
     core.info(`Injecting version into '${injectVersion} (${appInfoContent})`)
-    fs.writeFileSync(injectVersion, )
+    fs.writeFileSync(injectVersion, appInfoContent)
   }
   
   core.setOutput("release-version", release);
