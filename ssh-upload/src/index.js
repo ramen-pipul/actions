@@ -3,6 +3,7 @@ const { NodeSSH } = require("node-ssh");
 const path = require("path");
 const fs = require("fs");
 const { filesize } = require("filesize");
+const { u } = require("tar");
 
 const stdOut = {
   onStdout: (chunk) => {
@@ -23,6 +24,7 @@ const stdOut = {
     const sourceFile = core.getInput("source-file");
     const remoteDir = core.getInput("remote-dir");
     const runScript = core.getInput("script");
+    const uploadIfNotExists = core.getInput("upload-if-not-exists");
 
     if (!(sourceDir || sourceFile) || (sourceDir && sourceFile)) {
       throw new Error("Either source-dir or source-file is required.");
@@ -45,10 +47,27 @@ const stdOut = {
 
     console.log(`Uploading files from '${sourceDir}'...`);
 
+    let foundFiles = false;
+
     if (sourceDir) {
       let uploadSize = 0;
       await ssh.putDirectory(sourceDir, "tmp", {
         recursive: true,
+        validate: async (itemPath) => {
+          if (!uploadIfNotExists) {
+            return true;
+          }
+          const baseName = path.basename(itemPath);
+          const { code } = await ssh.exec("test", ["-e", `${remoteDir}/${baseName}`]);
+          const upload = code !== 0
+
+          if (!upload) {
+            foundFiles = true;
+            console.log(`Skipping ${baseName}. Already exists on the server.`);
+          }
+
+          return upload;
+        },
         tick: (local, remote, error) => {
           if (error) {
             throw new Error(`Cannot upload ${local}`);
@@ -61,8 +80,13 @@ const stdOut = {
         },
       });
 
-      await ssh.exec("rm", ["-rf", remoteDir], stdOut);
-      await ssh.exec("mv", ["tmp", remoteDir], stdOut);
+      if (foundFiles) {
+        await ssh.exec("cp", ["-r", "tmp/*", remoteDir], stdOut);
+      }
+      else {
+        await ssh.exec("rm", ["-rf", remoteDir], stdOut);
+        await ssh.exec("mv", ["tmp", remoteDir], stdOut);
+      }
 
       console.log(
         `${fileCounter} files uploaded. Total of ${filesize(
