@@ -16,6 +16,11 @@ inputs:
   source-dir:
     description: 'Source directory that will be uploaded'
     default: 'build'
+  upload-if-not-exists:
+    description: 'Uploads the source directory only if the remote directory does not exist'
+    default: 'false'
+  script:
+    description: 'Script that will be executed on the remote server after the upload'
 runs:
   using: 'node16'
   main: 'bin/index.js'
