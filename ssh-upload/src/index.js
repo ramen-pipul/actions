@@ -3,7 +3,6 @@ const { NodeSSH } = require("node-ssh");
 const path = require("path");
 const fs = require("fs");
 const { filesize } = require("filesize");
-const { u } = require("tar");
 
 const stdOut = {
   onStdout: (chunk) => {
